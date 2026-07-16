@@ -45,39 +45,91 @@ pub async fn connect_server(addr: &str) -> anyhow::Result<io::Transport> {
 /// Bidirectional relay between two transports.
 /// When either direction closes, both sides are fully shut down.
 pub async fn relay(mut container: io::Transport, mut server: io::Transport) {
-    let c2s = async {
-        let mut buf = vec![0u8; airlock_common::RELAY_CHUNK_SIZE];
-        loop {
-            match container.read.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if server.write.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    };
-
-    let s2c = async {
-        let mut buf = vec![0u8; airlock_common::RELAY_CHUNK_SIZE];
-        loop {
-            match server.read.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if container.write.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    };
-
     // When either direction finishes, shut down everything
     tokio::select! {
-        () = c2s => {}
-        () = s2c => {}
+        () = relay_direction(&mut container.read, &mut server.write) => {}
+        () = relay_direction(&mut server.read, &mut container.write) => {}
     }
     let _ = server.write.shutdown().await;
     let _ = container.write.shutdown().await;
+}
+
+async fn relay_direction(reader: &mut io::BoxRead, writer: &mut io::BoxWrite) {
+    let mut buf = vec![0u8; airlock_common::RELAY_CHUNK_SIZE];
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if writer.write_all(&buf[..n]).await.is_err() || writer.flush().await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+
+    use tokio::io::AsyncWrite;
+
+    use super::*;
+
+    struct FlushGatedWriter {
+        pending: Vec<u8>,
+        visible: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl AsyncWrite for FlushGatedWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.pending.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let pending = std::mem::take(&mut self.pending);
+            self.visible.lock().unwrap().extend_from_slice(&pending);
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            self.poll_flush(cx)
+        }
+    }
+
+    #[tokio::test]
+    async fn relay_flushes_each_chunk() {
+        let visible = Arc::new(Mutex::new(Vec::new()));
+        let writer = FlushGatedWriter {
+            pending: Vec::new(),
+            visible: visible.clone(),
+        };
+        let (pending_stream, _peer) = tokio::io::duplex(64);
+        let (pending_read, _) = tokio::io::split(pending_stream);
+
+        let container = io::Transport {
+            read: Box::new(std::io::Cursor::new(b"interactive frame".to_vec())),
+            write: Box::new(tokio::io::sink()),
+            h2: false,
+        };
+        let server = io::Transport {
+            read: Box::new(pending_read),
+            write: Box::new(writer),
+            h2: false,
+        };
+
+        relay(container, server).await;
+
+        assert_eq!(&*visible.lock().unwrap(), b"interactive frame");
+    }
 }

@@ -36,9 +36,9 @@ the service to settle as accepted or rejected before deciding whether to shut
 down HTTP or enter the raw tunnel.
 
 Once both Hyper drivers yield their upgraded streams, Airlock relays bytes in
-both directions until either peer closes. The upstream Hyper read buffer is
-explicitly retained so bytes coalesced with the `101` are not lost. Each raw
-write is flushed because the TLS MITM streams otherwise retain small
+both directions until either peer closes. Hyper's upgraded streams retain
+their internal read buffers, so bytes coalesced with the `101` are not lost.
+Each raw write is flushed because the TLS MITM streams otherwise retain small
 interactive frames even though the HTTP response itself has arrived.
 
 ## Send-compatible RPC transport
@@ -68,4 +68,3 @@ The regression suite exercises:
 
 HTTP/2 extended CONNECT from RFC 8441 remains out of scope; normal HTTP/2
 traffic is unchanged.
-

@@ -10,7 +10,7 @@ use airlock_common::network_capnp::{connect_result, network_proxy, tcp_sink};
 use axum::Router;
 use bytes::{Buf, Bytes};
 use capnp_rpc::{rpc_twoparty_capnp, twoparty};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
@@ -130,16 +130,9 @@ where
     F: FnOnce(network_proxy::Client, RequestLog, String /* mitm_ca_pem */) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let local = LocalSet::new();
-    rt.block_on(local.run_until(async move {
-        let (log, mitm_ca_pem, network) = build_network(cfg);
-        let proxy = start_rpc(network);
-        f(proxy, log, mitm_ca_pem).await;
-    }));
+    run_with_config_and_events(cfg, |proxy, log, mitm_ca_pem, _events| {
+        f(proxy, log, mitm_ca_pem)
+    });
 }
 
 /// Full test runner with a network-event receiver for lifecycle assertions.
@@ -463,4 +456,70 @@ pub fn http_post(port: u16, path: &str, body: &str) -> String {
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+pub fn websocket_request(port: u16, path: &str) -> Vec<u8> {
+    format!(
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+pub async fn read_http_head<S>(stream: &mut S) -> (Vec<u8>, Vec<u8>)
+where
+    S: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    loop {
+        let mut chunk = [0u8; 1024];
+        let n = stream.read(&mut chunk).await.unwrap();
+        assert_ne!(n, 0, "peer closed before HTTP headers completed");
+        bytes.extend_from_slice(&chunk[..n]);
+        if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap()
+        + 4;
+    let trailing = bytes.split_off(header_end);
+    (bytes, trailing)
+}
+
+pub async fn write_websocket_upgrade<S>(stream: &mut S, initial_payload: &[u8])
+where
+    S: AsyncWrite + Unpin,
+{
+    stream
+        .write_all(
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    stream.write_all(initial_payload).await.unwrap();
+    stream.flush().await.unwrap();
+}
+
+pub async fn echo_until_eof<S>(stream: &mut S)
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut buf = [0u8; 1024];
+    loop {
+        let n = stream.read(&mut buf).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        stream.write_all(&buf[..n]).await.unwrap();
+    }
+}
+
+pub fn assert_websocket_response(response: &[u8]) {
+    let text = String::from_utf8_lossy(response).to_ascii_lowercase();
+    assert!(text.contains("101 switching protocols"), "{text}");
+    assert!(text.contains("connection: upgrade\r\n"), "{text}");
+    assert!(text.contains("upgrade: websocket\r\n"), "{text}");
 }

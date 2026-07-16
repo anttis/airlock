@@ -225,19 +225,7 @@ fn websocket_upgrade_through_tls_mitm() {
             tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut stream = acceptor.accept(stream).await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0u8; 1024];
-                    let n = stream.read(&mut chunk).await.unwrap();
-                    assert_ne!(n, 0, "client closed before TLS upgrade request");
-                    request.extend_from_slice(&chunk[..n]);
-                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-
-                let header_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-                let tunneled = request.split_off(header_end);
+                let (request, tunneled) = read_http_head(&mut stream).await;
                 let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
                 assert!(headers.contains("connection: upgrade\r\n"), "{headers}");
                 assert!(headers.contains("upgrade: websocket\r\n"), "{headers}");
@@ -246,23 +234,9 @@ fn websocket_upgrade_through_tls_mitm() {
                     "{headers}"
                 );
 
-                stream
-                    .write_all(
-                        b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\ntls-server-first",
-                    )
-                    .await
-                    .unwrap();
-                stream.flush().await.unwrap();
+                write_websocket_upgrade(&mut stream, b"tls-server-first").await;
                 stream.write_all(&tunneled).await.unwrap();
-
-                let mut buf = [0u8; 1024];
-                loop {
-                    let n = stream.read(&mut buf).await.unwrap();
-                    if n == 0 {
-                        break;
-                    }
-                    stream.write_all(&buf[..n]).await.unwrap();
-                }
+                echo_until_eof(&mut stream).await;
             });
 
             let conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
@@ -277,11 +251,7 @@ fn websocket_upgrade_through_tls_mitm() {
             .await;
             assert_eq!(alpn.as_deref(), Some(b"http/1.1".as_ref()));
 
-            let handshake = format!(
-                "GET /responses HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-                addr.port()
-            )
-            .into_bytes();
+            let handshake = websocket_request(addr.port(), "/responses");
             tls_stream.write_all(&handshake).await.unwrap();
             tls_stream.flush().await.unwrap();
 
@@ -303,19 +273,7 @@ fn websocket_upgrade_through_tls_mitm() {
                 "timed out waiting for upgraded TLS bytes: {:?}",
                 String::from_utf8_lossy(&response)
             );
-            let response_text = String::from_utf8_lossy(&response).to_ascii_lowercase();
-            assert!(
-                response_text.contains("101 switching protocols"),
-                "{response_text}"
-            );
-            assert!(
-                response_text.contains("connection: upgrade\r\n"),
-                "{response_text}"
-            );
-            assert!(
-                response_text.contains("upgrade: websocket\r\n"),
-                "{response_text}"
-            );
+            assert_websocket_response(&response);
 
             tls_stream.write_all(b"tls-payload").await.unwrap();
             tls_stream.flush().await.unwrap();

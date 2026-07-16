@@ -184,19 +184,7 @@ fn websocket_upgrade_runs_middleware_and_relays_bytes() {
             let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0u8; 1024];
-                    let n = stream.read(&mut chunk).await.unwrap();
-                    assert_ne!(n, 0, "client closed before upgrade request");
-                    request.extend_from_slice(&chunk[..n]);
-                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-
-                let header_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-                let tunneled = request.split_off(header_end);
+                let (request, tunneled) = read_http_head(&mut stream).await;
                 let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
                 assert!(headers.contains("connection: upgrade\r\n"), "{headers}");
                 assert!(headers.contains("upgrade: websocket\r\n"), "{headers}");
@@ -205,50 +193,21 @@ fn websocket_upgrade_runs_middleware_and_relays_bytes() {
                     "{headers}"
                 );
 
-                stream
-                    .write_all(
-                        b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\nserver-first",
-                    )
-                    .await
-                    .unwrap();
+                write_websocket_upgrade(&mut stream, b"server-first").await;
                 stream.write_all(&tunneled).await.unwrap();
-
-                let mut buf = [0u8; 1024];
-                loop {
-                    let n = stream.read(&mut buf).await.unwrap();
-                    if n == 0 {
-                        break;
-                    }
-                    stream.write_all(&buf[..n]).await.unwrap();
-                }
+                echo_until_eof(&mut stream).await;
                 let _ = closed_tx.send(());
             });
 
             let mut conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
                 .await
                 .unwrap();
-            let mut handshake = format!(
-                "GET /responses HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-                addr.port()
-            )
-            .into_bytes();
+            let mut handshake = websocket_request(addr.port(), "/responses");
             handshake.extend_from_slice(b"client-first");
             conn.send(&handshake).await;
 
             let response = conn.recv_bytes(500).await;
-            let response_text = String::from_utf8_lossy(&response).to_ascii_lowercase();
-            assert!(
-                response_text.contains("101 switching protocols"),
-                "{response_text}"
-            );
-            assert!(
-                response_text.contains("connection: upgrade\r\n"),
-                "{response_text}"
-            );
-            assert!(
-                response_text.contains("upgrade: websocket\r\n"),
-                "{response_text}"
-            );
+            assert_websocket_response(&response);
             assert!(
                 response
                     .windows(b"server-first".len())
@@ -313,11 +272,8 @@ fn synthetic_websocket_upgrade_is_rejected() {
             let mut conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
                 .await
                 .unwrap();
-            let request = format!(
-                "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
-                addr.port()
-            );
-            let response = conn.roundtrip(&request).await;
+            conn.send(&websocket_request(addr.port(), "/")).await;
+            let response = conn.recv(3000).await;
             assert!(response.contains("502 Bad Gateway"), "{response}");
             assert!(
                 response.contains("invalid upstream HTTP upgrade"),
@@ -325,6 +281,59 @@ fn synthetic_websocket_upgrade_is_rejected() {
             );
         },
     );
+}
+
+#[test]
+fn rejected_upgrade_can_be_followed_by_valid_upgrade() {
+    run_plain(|proxy| async move {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+
+            let (first_request, trailing) = read_http_head(&mut stream).await;
+            assert!(trailing.is_empty());
+            assert!(String::from_utf8_lossy(&first_request).starts_with("GET /reject "));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+
+            let (second_request, trailing) = read_http_head(&mut stream).await;
+            assert!(String::from_utf8_lossy(&second_request).starts_with("GET /accept "));
+            write_websocket_upgrade(&mut stream, b"accepted").await;
+            stream.write_all(&trailing).await.unwrap();
+            echo_until_eof(&mut stream).await;
+        });
+
+        let mut conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
+            .await
+            .unwrap();
+        conn.send(&websocket_request(addr.port(), "/reject")).await;
+        let rejected = conn.recv(500).await;
+        assert!(rejected.contains("200 OK"), "{rejected}");
+
+        let mut accepted = websocket_request(addr.port(), "/accept");
+        accepted.extend_from_slice(b"coalesced-client-bytes");
+        conn.send(&accepted).await;
+        let response = conn.recv_bytes(500).await;
+        assert_websocket_response(&response);
+        assert!(
+            response
+                .windows(b"accepted".len())
+                .any(|w| w == b"accepted"),
+            "server bytes coalesced with the second response were lost"
+        );
+        assert!(
+            response
+                .windows(b"coalesced-client-bytes".len())
+                .any(|w| w == b"coalesced-client-bytes"),
+            "client bytes coalesced with the second request were lost"
+        );
+
+        conn.close().await;
+    });
 }
 
 #[test]
@@ -336,19 +345,8 @@ fn websocket_upstream_close_ends_tunnel() {
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let mut chunk = [0u8; 1024];
-                    let n = stream.read(&mut chunk).await.unwrap();
-                    assert_ne!(n, 0);
-                    request.extend_from_slice(&chunk[..n]);
-                }
-                stream
-                    .write_all(
-                        b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
-                    )
-                    .await
-                    .unwrap();
+                let _ = read_http_head(&mut stream).await;
+                write_websocket_upgrade(&mut stream, &[]).await;
 
                 let mut payload = [0u8; 16];
                 stream.read_exact(&mut payload).await.unwrap();
@@ -360,13 +358,9 @@ fn websocket_upstream_close_ends_tunnel() {
             let mut conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
                 .await
                 .unwrap();
-            let request = format!(
-                "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n",
-                addr.port()
-            );
-            conn.send(request.as_bytes()).await;
-            let response = conn.recv(500).await;
-            assert!(response.contains("101 Switching Protocols"), "{response}");
+            conn.send(&websocket_request(addr.port(), "/")).await;
+            let response = conn.recv_bytes(500).await;
+            assert_websocket_response(&response);
 
             conn.send(b"close-after-echo").await;
             assert_eq!(conn.recv_bytes(500).await, b"close-after-echo".as_slice());
