@@ -94,6 +94,16 @@ Port and unix socket forwards are always passthrough: the guest-side
 `localhost:<port>` may carry arbitrary traffic to whatever service runs
 on the host port, so interception is suppressed automatically.
 
+### WebSockets
+
+HTTP/1.1 WebSockets work through the normal intercepted path; they do not
+need a passthrough rule. Airlock applies policy and middleware to the upgrade
+request and response, then switches the accepted connection to a raw
+bidirectional tunnel. This lets middleware inject authentication headers into
+the handshake without attempting to interpret WebSocket frames afterward.
+
+HTTP/2 extended CONNECT WebSockets are not currently supported.
+
 ## Middleware
 
 When you need to do more than just allow or deny connections — for example,
@@ -236,4 +246,3 @@ guest = ["5000:4000"]   # host :5000 → guest :4000
 
 Like other config entries, port forward groups can be disabled with
 `enabled = false`.
-

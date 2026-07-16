@@ -80,6 +80,22 @@ async fn tls_roundtrip_with_alpn(
     path: &str,
     client_alpn: Vec<Vec<u8>>,
 ) -> (String, Option<Vec<u8>>) {
+    let (mut tls_stream, alpn) = tls_connect(stream, ca_pem, host, client_alpn).await;
+
+    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
+    tls_stream.write_all(req.as_bytes()).await.unwrap();
+
+    let mut buf = Vec::new();
+    let _ = tls_stream.read_to_end(&mut buf).await;
+    (String::from_utf8_lossy(&buf).into_owned(), alpn)
+}
+
+async fn tls_connect(
+    stream: RpcStream,
+    ca_pem: &str,
+    host: &str,
+    client_alpn: Vec<Vec<u8>>,
+) -> (tokio_rustls::client::TlsStream<RpcStream>, Option<Vec<u8>>) {
     let mut root_store = rustls::RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut ca_pem.as_bytes()) {
         root_store.add(cert.unwrap()).unwrap();
@@ -93,14 +109,7 @@ async fn tls_roundtrip_with_alpn(
     let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).unwrap();
     let tls_stream = connector.connect(server_name, stream).await.unwrap();
     let alpn = tls_stream.get_ref().1.alpn_protocol().map(Vec::from);
-
-    let mut tls_stream = tls_stream;
-    let req = format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n");
-    tls_stream.write_all(req.as_bytes()).await.unwrap();
-
-    let mut buf = Vec::new();
-    let _ = tls_stream.read_to_end(&mut buf).await;
-    (String::from_utf8_lossy(&buf).into_owned(), alpn)
+    (tls_stream, alpn)
 }
 
 async fn tls_roundtrip(
@@ -192,6 +201,143 @@ fn tls_mitm_with_middleware() {
                 resp.contains("from-lua-over-tls"),
                 "expected injected header: {resp}"
             );
+        },
+    );
+}
+
+#[test]
+fn websocket_upgrade_through_tls_mitm() {
+    let (server_tls, server_ca_pem) = make_server_tls();
+
+    run_with_config(
+        TestNetworkConfig {
+            trust_cas: vec![server_ca_pem],
+            middleware_scripts: vec![(
+                "codex-shaped auth",
+                r#"req:setHeader("authorization", "Bearer host-secret")"#,
+            )],
+            ..Default::default()
+        },
+        |proxy, _log, mitm_ca_pem| async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(server_tls);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = acceptor.accept(stream).await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let n = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(n, 0, "client closed before TLS upgrade request");
+                    request.extend_from_slice(&chunk[..n]);
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                let header_end = request.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                let tunneled = request.split_off(header_end);
+                let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                assert!(headers.contains("connection: upgrade\r\n"), "{headers}");
+                assert!(headers.contains("upgrade: websocket\r\n"), "{headers}");
+                assert!(
+                    headers.contains("authorization: bearer host-secret\r\n"),
+                    "{headers}"
+                );
+
+                stream
+                    .write_all(
+                        b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\ntls-server-first",
+                    )
+                    .await
+                    .unwrap();
+                stream.flush().await.unwrap();
+                stream.write_all(&tunneled).await.unwrap();
+
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = stream.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    stream.write_all(&buf[..n]).await.unwrap();
+                }
+            });
+
+            let conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
+                .await
+                .unwrap();
+            let (mut tls_stream, alpn) = tls_connect(
+                conn.into_stream(),
+                &mitm_ca_pem,
+                "127.0.0.1",
+                vec![b"http/1.1".to_vec()],
+            )
+            .await;
+            assert_eq!(alpn.as_deref(), Some(b"http/1.1".as_ref()));
+
+            let handshake = format!(
+                "GET /responses HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+                addr.port()
+            )
+            .into_bytes();
+            tls_stream.write_all(&handshake).await.unwrap();
+            tls_stream.flush().await.unwrap();
+
+            let mut response = Vec::new();
+            let read_result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let n = tls_stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(n, 0, "upgrade tunnel closed during handshake");
+                    response.extend_from_slice(&chunk[..n]);
+                    if response.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(
+                read_result.is_ok(),
+                "timed out waiting for upgraded TLS bytes: {:?}",
+                String::from_utf8_lossy(&response)
+            );
+            let response_text = String::from_utf8_lossy(&response).to_ascii_lowercase();
+            assert!(
+                response_text.contains("101 switching protocols"),
+                "{response_text}"
+            );
+            assert!(
+                response_text.contains("connection: upgrade\r\n"),
+                "{response_text}"
+            );
+            assert!(
+                response_text.contains("upgrade: websocket\r\n"),
+                "{response_text}"
+            );
+
+            tls_stream.write_all(b"tls-payload").await.unwrap();
+            tls_stream.flush().await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let n = tls_stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(n, 0, "upgrade tunnel closed before echo");
+                    response.extend_from_slice(&chunk[..n]);
+                    if response
+                        .windows(b"tls-server-first".len())
+                        .any(|w| w == b"tls-server-first")
+                        && response
+                            .windows(b"tls-payload".len())
+                            .any(|w| w == b"tls-payload")
+                    {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("timed out waiting for bidirectional TLS upgrade bytes");
         },
     );
 }

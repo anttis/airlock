@@ -116,6 +116,22 @@ relay between them would hand h1 bytes to an h2 server that rejected
 them. Moving all TLS to the CLI means one endpoint owns the whole
 protocol stack and ALPN can be proxied faithfully.
 
+## HTTP upgrades
+
+Standard WebSockets begin as an HTTP/1.1 request with `Connection: Upgrade`.
+The CLI forwards that handshake through the normal HTTP relay, so policy,
+request monitoring, and Lua middleware still see it. When the real server
+returns a valid `101 Switching Protocols`, Hyper yields both underlying
+connections and the CLI joins them as a raw bidirectional byte tunnel.
+
+The tunnel remains active until either peer closes. Small upgraded messages
+are flushed after every relay write because TLS streams may otherwise buffer
+interactive WebSocket frames. A synthetic or malformed `101` is converted to
+a `502` instead of switching protocols without a real upstream connection.
+
+This handles HTTP/1.1 upgrades. HTTP/2 extended CONNECT (RFC 8441) continues
+through the ordinary HTTP/2 path and is not upgraded.
+
 ## Lua middleware
 
 Middleware is a top-level `[network.middleware]` section, separate

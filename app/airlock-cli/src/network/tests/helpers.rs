@@ -142,6 +142,30 @@ where
     }));
 }
 
+/// Full test runner with a network-event receiver for lifecycle assertions.
+pub fn run_with_config_and_events<F, Fut>(cfg: TestNetworkConfig, f: F)
+where
+    F: FnOnce(
+        network_proxy::Client,
+        RequestLog,
+        String, /* mitm_ca_pem */
+        tokio::sync::broadcast::Receiver<airlock_monitor::NetworkEvent>,
+    ) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local = LocalSet::new();
+    rt.block_on(local.run_until(async move {
+        let (log, mitm_ca_pem, network) = build_network(cfg);
+        let events = network.events.subscribe();
+        let proxy = start_rpc(network);
+        f(proxy, log, mitm_ca_pem, events).await;
+    }));
+}
+
 fn build_network(cfg: TestNetworkConfig) -> (RequestLog, String, Network) {
     // Build rules from test config (no middleware — rules are pure allow/deny).
     let mut rules = BTreeMap::new();
@@ -277,7 +301,8 @@ pub struct TestConnection {
 impl TestConnection {
     pub async fn connect(proxy: &network_proxy::Client, host: &str, port: u16) -> Option<Self> {
         let (tx, container_rx) = mpsc::channel::<Bytes>(16);
-        let client_sink: tcp_sink::Client = capnp_rpc::new_client(CollectorSink(tx));
+        let client_sink: tcp_sink::Client =
+            capnp_rpc::new_client(CollectorSink(std::cell::RefCell::new(Some(tx))));
 
         let mut req = proxy.connect_request();
         let mut tcp = req.get().init_target().init_tcp();
@@ -309,6 +334,10 @@ impl TestConnection {
     }
 
     pub async fn recv(&mut self, timeout_ms: u64) -> String {
+        String::from_utf8_lossy(&self.recv_bytes(timeout_ms).await).into_owned()
+    }
+
+    pub async fn recv_bytes(&mut self, timeout_ms: u64) -> Bytes {
         let mut buf = bytes::BytesMut::new();
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
         loop {
@@ -322,7 +351,12 @@ impl TestConnection {
                 () = tokio::time::sleep_until(deadline) => break,
             }
         }
-        String::from_utf8_lossy(&buf).into_owned()
+        buf.freeze()
+    }
+
+    pub async fn close(self) {
+        let req = self.server_sink.close_request();
+        let _ = req.send().promise.await;
     }
 
     /// Convert this connection into an AsyncRead + AsyncWrite stream.
@@ -392,12 +426,15 @@ impl AsyncWrite for RpcStream {
     }
 }
 
-struct CollectorSink(mpsc::Sender<Bytes>);
+struct CollectorSink(std::cell::RefCell<Option<mpsc::Sender<Bytes>>>);
 
 impl tcp_sink::Server for CollectorSink {
     async fn send(self: Rc<Self>, params: tcp_sink::SendParams) -> Result<(), capnp::Error> {
         let data = params.get()?.get_data()?;
-        let _ = self.0.send(Bytes::copy_from_slice(data)).await;
+        let tx = self.0.borrow().clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(Bytes::copy_from_slice(data)).await;
+        }
         Ok(())
     }
 
@@ -406,6 +443,7 @@ impl tcp_sink::Server for CollectorSink {
         _params: tcp_sink::CloseParams,
         _results: tcp_sink::CloseResults,
     ) -> Result<(), capnp::Error> {
+        self.0.borrow_mut().take();
         Ok(())
     }
 }
