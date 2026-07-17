@@ -14,10 +14,13 @@ use bytes::{Buf, Bytes};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
+mod rpc;
+pub use rpc::RpcTransport;
+
 /// Boxed read half for type-erased async streams.
-pub type BoxRead = Box<dyn AsyncRead + Unpin>;
+pub type BoxRead = Box<dyn AsyncRead + Send + Unpin>;
 /// Boxed write half for type-erased async streams.
-pub type BoxWrite = Box<dyn AsyncWrite + Unpin>;
+pub type BoxWrite = Box<dyn AsyncWrite + Send + Unpin>;
 
 /// A connection endpoint with boxed read/write streams and h2 flag.
 pub struct Transport {
@@ -69,85 +72,6 @@ impl AsyncRead for PrefixedRead {
     }
 }
 
-/// Bridges an mpsc channel + RPC sink into `AsyncRead + AsyncWrite`.
-pub struct RpcTransport {
-    prefix: Bytes,
-    rx: mpsc::Receiver<Bytes>,
-    client_sink: tcp_sink::Client,
-    pending: Bytes,
-}
-
-impl RpcTransport {
-    /// Create a transport with an optional prefix (pre-read bytes), an mpsc
-    /// receiver for incoming data, and an RPC sink for outgoing data.
-    pub fn new(
-        prefix: impl Into<Bytes>,
-        rx: mpsc::Receiver<Bytes>,
-        client_sink: tcp_sink::Client,
-    ) -> Self {
-        Self {
-            prefix: prefix.into(),
-            rx,
-            client_sink,
-            pending: Bytes::new(),
-        }
-    }
-
-    fn drain(src: &mut Bytes, buf: &mut ReadBuf<'_>) {
-        let n = src.len().min(buf.remaining());
-        buf.put_slice(&src[..n]);
-        src.advance(n);
-    }
-}
-
-impl AsyncRead for RpcTransport {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if !self.prefix.is_empty() {
-            Self::drain(&mut self.prefix, buf);
-            return Poll::Ready(Ok(()));
-        }
-        if !self.pending.is_empty() {
-            Self::drain(&mut self.pending, buf);
-            return Poll::Ready(Ok(()));
-        }
-        match self.rx.poll_recv(cx) {
-            Poll::Ready(Some(mut data)) => {
-                Self::drain(&mut data, buf);
-                if !data.is_empty() {
-                    self.pending = data;
-                }
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(None) => Poll::Ready(Ok(())),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl AsyncWrite for RpcTransport {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        let mut req = self.client_sink.send_request();
-        req.get().set_data(buf);
-        drop(req.send());
-        Poll::Ready(Ok(buf.len()))
-    }
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        drop(self.client_sink.close_request().send());
-        Poll::Ready(Ok(()))
-    }
-}
-
 /// Shared error state between relay task and ChannelSink.
 pub type RelayError = Rc<RefCell<Option<String>>>;
 
@@ -196,5 +120,19 @@ impl tcp_sink::Server for ChannelSink {
     ) -> Result<(), capnp::Error> {
         self.tx.borrow_mut().take();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_send<T: Send>() {}
+
+    #[test]
+    fn http_transport_types_are_send() {
+        assert_send::<RpcTransport>();
+        assert_send::<PrefixedRead>();
+        assert_send::<Transport>();
     }
 }

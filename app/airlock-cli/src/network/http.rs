@@ -9,6 +9,7 @@ pub mod body;
 mod executor;
 pub mod middleware;
 mod senders;
+mod upgrade;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,12 +17,13 @@ use std::rc::Rc;
 use http_body_util::{Either, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
-use hyper::{Request, Response};
+use hyper::{Request, Response, StatusCode};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::{debug, trace};
 
 use crate::network::http::executor::LocalExecutor;
 use crate::network::http::senders::{H1Sender, H2Sender, RequestSender};
+use crate::network::http::upgrade::{ResponseAction, UpgradeCoordinator};
 use crate::network::target::ResolvedTarget;
 use crate::network::{DenyReporter, io};
 
@@ -119,23 +121,27 @@ pub async fn relay(
     } else {
         let (sender, conn): (hyper::client::conn::http1::SendRequest<ResponseBody>, _) =
             hyper::client::conn::http1::handshake(server_io).await?;
-        let handle = tokio::task::spawn_local(conn);
+        let handle = tokio::task::spawn_local(conn.with_upgrades());
         debug!("h1 client handshake complete");
         (Rc::new(H1Sender(RefCell::new(sender))), handle)
     };
 
+    let upgrades = Rc::new(UpgradeCoordinator::default());
     let middleware = target.middleware;
     let target_host = target.host.clone();
     let target_port = target.port;
     let allowed = target.allowed;
-    let service = service_fn(move |req: Request<Incoming>| {
+    let service_upgrades = upgrades.clone();
+    let service = service_fn(move |mut req: Request<Incoming>| {
         let sender = sender.clone();
         let middleware = middleware.clone();
         let events = events.clone();
         let target_host = target_host.clone();
         let deny_reporter = deny_reporter.clone();
+        let upgrades = service_upgrades.clone();
         async move {
             emit_request_event(&events, &req, &target_host, target_port, allowed);
+            upgrades.begin_request(&mut req);
             let result = middleware::run(req, &middleware, deny_reporter, move |req| {
                 let sender = sender.clone();
                 async move { sender.send(req).await.map_err(|e| anyhow::anyhow!("{e}")) }
@@ -143,13 +149,17 @@ pub async fn relay(
             .await;
 
             match result {
-                Ok(resp) => Ok::<_, hyper::Error>(resp),
+                Ok(mut resp) => match upgrades.complete_response(&mut resp) {
+                    ResponseAction::Forward => Ok::<_, hyper::Error>(resp),
+                    ResponseAction::InvalidUpgrade => {
+                        debug!("rejected malformed or synthetic HTTP upgrade response");
+                        Ok(bad_gateway("invalid upstream HTTP upgrade\n"))
+                    }
+                },
                 Err(e) => {
+                    upgrades.cancel_attempt();
                     debug!("middleware error: {e}");
-                    Ok(Response::builder()
-                        .status(502)
-                        .body(Either::Right(Full::new(Bytes::from(format!("{e}\n")))))
-                        .unwrap())
+                    Ok(bad_gateway(&format!("{e}\n")))
                 }
             }
         }
@@ -161,19 +171,70 @@ pub async fn relay(
     // sender produces "operation was canceled" 502s for every subsequent
     // request on the same guest connection.
     let builder = hyper_util::server::conn::auto::Builder::new(LocalExecutor);
-    let connection = builder.serve_connection(client_io, service);
+    let connection = builder.serve_connection_with_upgrades(client_io, service);
     let mut connection = std::pin::pin!(connection);
+    let mut upstream_conn = upstream_conn;
 
-    tokio::select! {
+    let (result, upstream_result, upgrade) = tokio::select! {
         result = &mut connection => {
-            result.map_err(|e| anyhow::anyhow!("http proxy: {e}"))
+            (
+                result.map_err(|e| anyhow::anyhow!("http proxy: {e}")),
+                None,
+                upgrades.take_accepted(),
+            )
         }
-        _ = upstream_conn => {
-            debug!("upstream connection closed, shutting down guest connection");
-            connection.as_mut().graceful_shutdown();
-            connection.await.map_err(|e| anyhow::anyhow!("http proxy shutdown: {e}"))
+        upstream_result = &mut upstream_conn => {
+            // An h1 connection future also completes when its protocol is
+            // upgraded. If the request service is still deciding whether a
+            // 101 is valid, keep driving it until the state is settled before
+            // applying ordinary upstream-close behaviour.
+            let (result, upgrade) = tokio::select! {
+                result = &mut connection => {
+                    (
+                        result.map_err(|e| anyhow::anyhow!("http proxy: {e}")),
+                        upgrades.take_accepted(),
+                    )
+                }
+                () = upgrades.wait_until_settled() => {
+                    let upgrade = upgrades.take_accepted();
+                    let result = if upgrade.is_some() {
+                        connection
+                            .await
+                            .map_err(|e| anyhow::anyhow!("http proxy upgrade: {e}"))
+                    } else {
+                        debug!("upstream connection closed, shutting down guest connection");
+                        connection.as_mut().graceful_shutdown();
+                        connection
+                            .await
+                            .map_err(|e| anyhow::anyhow!("http proxy shutdown: {e}"))
+                    };
+                    (result, upgrade)
+                }
+            };
+            (result, Some(upstream_result), upgrade)
         }
-    }
+    };
+
+    let Some(upgrade) = upgrade else {
+        return result;
+    };
+
+    result?;
+    let upstream_result = match upstream_result {
+        Some(result) => result,
+        None => upstream_conn.await,
+    };
+    upstream_result.map_err(|e| anyhow::anyhow!("upstream HTTP task: {e}"))??;
+    upgrade.relay().await
+}
+
+fn bad_gateway(message: &str) -> Response<ResponseBody> {
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .body(Either::Right(Full::new(Bytes::copy_from_slice(
+            message.as_bytes(),
+        ))))
+        .unwrap()
 }
 
 /// Broadcast a `NetworkEvent::Request` describing this HTTP request. Silently
