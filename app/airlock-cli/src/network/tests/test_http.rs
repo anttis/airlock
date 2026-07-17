@@ -364,10 +364,7 @@ fn websocket_upstream_close_ends_tunnel() {
 
             conn.send(b"close-after-echo").await;
             assert_eq!(conn.recv_bytes(500).await, b"close-after-echo".as_slice());
-            assert!(
-                conn.recv_bytes(1000).await.is_empty(),
-                "guest connection stayed open after upstream closed"
-            );
+            conn.wait_closed(1000).await;
 
             tokio::time::timeout(std::time::Duration::from_secs(1), async {
                 loop {

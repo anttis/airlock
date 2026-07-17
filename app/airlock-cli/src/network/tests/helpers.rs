@@ -347,6 +347,22 @@ impl TestConnection {
         buf.freeze()
     }
 
+    pub async fn wait_closed(&mut self, timeout_ms: u64) {
+        match tokio::time::timeout(
+            tokio::time::Duration::from_millis(timeout_ms),
+            self.container_rx.recv(),
+        )
+        .await
+        {
+            Ok(None) => {}
+            Ok(Some(data)) => panic!(
+                "received {} unexpected bytes before connection closed",
+                data.len()
+            ),
+            Err(error) => panic!("connection stayed open for {timeout_ms}ms: {error}"),
+        }
+    }
+
     pub async fn close(self) {
         let req = self.server_sink.close_request();
         let _ = req.send().promise.await;
