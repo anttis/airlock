@@ -19,9 +19,9 @@ the real key into request headers to the OpenAI hosts.
 - **Only OpenAI endpoints are reachable** (`api.openai.com` and
   `auth.openai.com`). Everything else stays blocked by your
   deny-by-default policy.
-- **Your Codex settings survive.** `~/.codex` is mapped to
-  `~/.airlock/codex/` on the host, so preferences and history carry
-  over between sandbox runs.
+- **Your Codex settings survive.** `~/.codex` maps to
+  `~/.airlock/codex/` on the host, so preferences and history persist
+  between sandbox runs.
 
 ## Example `airlock.toml`
 
@@ -50,7 +50,7 @@ airlock secrets add OPENAI_API_KEY
 
 The preset resolves `${OPENAI_API_KEY}` from the host env first and
 the vault as a fallback. A missing value aborts `airlock start` with
-a clear error rather than silently shipping requests without auth.
+a clear error rather than silently sending requests without auth.
 
 ## Running it
 

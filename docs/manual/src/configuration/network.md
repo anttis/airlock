@@ -1,13 +1,14 @@
 # Network
 
 The VM has no network interfaces of its own. All TCP traffic from the guest
-is routed through a vsock channel back to the host, where airlock evaluates
+routes back to the host. There, airlock evaluates
 it against the configured network rules. This gives the host full control
 over what the sandbox can reach.
 
 ## Policy
 
-The network `policy` controls the overall behavior before rules are evaluated:
+The network `policy` controls the overall behaviour before airlock evaluates
+rules:
 
 ```toml
 [network]
@@ -16,17 +17,19 @@ policy = "deny-by-default"
 
 Available policies:
 
-| Policy             | Behavior                                                      |
-|--------------------|---------------------------------------------------------------|
-| `allow-always`     | Skip rules, allow all connections (default)                   |
-| `deny-always`      | Skip rules, deny everything (including port forwards/sockets) |
-| `allow-by-default` | Allow unless explicitly denied by a rule                      |
-| `deny-by-default`  | Deny unless explicitly allowed by a rule                      |
+| Policy             | Behavior                                                              |
+|--------------------|-----------------------------------------------------------------------|
+| `allow-always`     | Skip rules, allow all connections (default)                           |
+| `deny-always`      | Skip rules, deny everything (including guest → host forwards/sockets) |
+| `allow-by-default` | Allow unless explicitly denied by a rule                              |
+| `deny-by-default`  | Deny unless explicitly allowed by a rule                              |
 
-With `deny-by-default`, only connections matching an explicit `allow` rule
-are permitted. This is the recommended starting point for security-sensitive
-projects. With `deny-always`, all network access is blocked — including port
-forwards and Unix socket forwarding.
+With `deny-by-default`, airlock permits only connections that match an
+explicit `allow` rule. This is the recommended starting point for
+security-sensitive projects. With `deny-always`, airlock blocks all network
+access from the guest — including guest → host port forwards and Unix
+socket forwarding. Host → guest reverse forwards are the exception (see
+[Port forwarding](#port-forwarding)).
 
 ## Network rules
 
@@ -55,19 +58,18 @@ deny = [
 ]
 ```
 
-The port part must be a number or `*` (or left out, which means the same as
-`*`). A malformed port such as `:8O80` or `:https` is a configuration error
-and airlock refuses to start, rather than quietly treating it as "any port".
+The port part must be a number or `*` (or left out to match all ports).
 
-Deny patterns are always checked first and win unconditionally, regardless of
-allow rules. This makes it safe to use broad wildcards in allow lists while
-still blocking specific destinations.
+airlock always checks deny patterns first, and they win unconditionally,
+regardless of allow rules. This makes it safe to use broad wildcards in
+allow lists while still blocking specific destinations.
 
-Host matching is case-insensitive and ignores a trailing dot, so a rule for
-`secret.example.com` also matches `SECRET.example.com` and `secret.example.com.`
-— a destination cannot slip past a deny rule by changing letter case.
+Host matching is case-insensitive and ignores a trailing dot. A rule for
+`secret.example.com` also matches `SECRET.example.com` and
+`secret.example.com.` — a destination cannot evade a deny rule with a
+change of letter case.
 
-Rules can be disabled without removing them:
+You can disable rules without removing them:
 
 ```toml
 [network.rules.debug-access]
@@ -77,12 +79,12 @@ allow = ["*"]
 
 ### Passthrough
 
-By default, every allowed connection is peeked at to detect TLS and HTTP so
-that the traffic can be intercepted and surfaced in the monitor. For
-non-HTTP protocols whose first bytes are neither ASCII request lines nor
-a TLS `ClientHello`, that detection would deadlock waiting for input the
-protocol will never send (Postgres' 8-byte `SSLRequest` is the classic
-example).
+By default, airlock peeks at the first bytes of every allowed connection to
+detect TLS and HTTP. This lets it intercept the traffic and show it in the
+monitor. For non-HTTP protocols whose first bytes are neither ASCII request
+lines nor a TLS `ClientHello`, that detection would deadlock. It would wait
+for input the protocol will never send (Postgres' 8-byte `SSLRequest` is
+the classic example).
 
 Mark such rules with `passthrough = true` to skip all detection and relay
 the connection as plain TCP:
@@ -94,12 +96,12 @@ passthrough = true
 ```
 
 A passthrough target cannot also be covered by middleware or by an
-injecting rule — both need interception. Airlock refuses to start and
+injecting rule — both need interception. airlock refuses to start and
 names the conflict.
 
 Port and unix socket forwards are always passthrough: the guest-side
 `localhost:<port>` may carry arbitrary traffic to whatever service runs
-on the host port, so interception is suppressed automatically.
+on the host port, so airlock suppresses interception automatically.
 
 ### Injecting masked secrets
 
@@ -118,15 +120,15 @@ allow = ["api.anthropic.com:443", "claude.ai:443"]
 ```
 
 The sandboxed program sends `Authorization: Bearer $CLAUDE_CODE_OAUTH_TOKEN`
-as it would on the host; the real token is filled in at the host boundary.
+as it would on the host. airlock inserts the real token at the host boundary.
 
 - Names must be `[env]` entries with `mask = true`.
 - Values must be at least 8 characters and valid in an HTTP header.
 - Injecting rules cannot be `passthrough`.
-- Only header values are rewritten — every header, every occurrence.
-  Header names, paths and bodies are not.
-- Request headers are unmasked before [middleware](#middleware) runs and
-  response headers are masked after it, so scripts see real values. The
+- airlock rewrites only header values — every header, every occurrence.
+  It does not rewrite header names, paths, or bodies.
+- airlock unmasks request headers before [middleware](#middleware) runs
+  and masks response headers after it, so scripts see real values. The
   monitor shows surrogates.
 
 ## Middleware
@@ -157,11 +159,12 @@ The `env` table maps names to values expanded from the host environment using
 `${VAR}` syntax. Inside the Lua script, these are available as `env.TOKEN`
 (or `nil` if the host variable isn't set).
 
-A per-project CA certificate is automatically generated and installed in the
-VM's system trust store, so TLS interception is transparent to processes
-inside the container — they see valid certificates.
+airlock automatically generates a per-project CA certificate and installs
+it in the VM's system trust store. TLS interception is therefore
+transparent to processes inside the container — they see valid
+certificates.
 
-Middleware can be disabled without removing it:
+You can disable middleware without removing it:
 
 ```toml
 [network.middleware.my-api-auth]
@@ -176,8 +179,8 @@ inspection, body manipulation, and chaining multiple middleware layers — see
 
 ## Unix socket forwarding
 
-Host Unix sockets can be forwarded into the guest container. This is commonly
-used for Docker socket access:
+airlock can forward host Unix sockets into the guest container. A common
+use is Docker socket access:
 
 ```toml
 [network.sockets.docker]
@@ -192,14 +195,14 @@ When the host and guest paths differ, use `"source:target"` syntax
 host = "~/.docker/run/docker.sock:/var/run/docker.sock"
 ```
 
-The socket appears at the specified guest path and connections are relayed
-back to the host socket transparently. Like other config entries, socket
-forwards can be disabled with `enabled = false`.
+The socket appears at the specified guest path. airlock relays connections
+back to the host socket transparently. Like other config entries, you can
+disable socket forwards with `enabled = false`.
 
 ## Port forwarding
 
 Port forwards bridge TCP between the host and the guest in either
-direction. Each forward is declared under `[network.ports.<group>]` and
+direction. You declare each forward under `[network.ports.<group>]`, and
 every entry uses the same `"host:guest"` string syntax — the **left
 side is always the host port, the right side is always the guest
 port**, regardless of which direction the forward runs.
@@ -211,9 +214,9 @@ both sides.
 
 Some projects run supporting services on the host — a local PostgreSQL,
 a Redis, a dev-mode backend on port 3000 — and the sandboxed process
-needs to talk to them. Rather than expose those services to the
-network, airlock can forward specific host TCP ports into the VM so
-that `localhost:<port>` inside the sandbox transparently reaches the
+needs to reach them. Rather than expose those services to the network,
+airlock can forward specific host TCP ports into the VM.
+`localhost:<port>` inside the sandbox then transparently reaches the
 host service, while everything else on loopback stays confined to the
 guest.
 
@@ -237,9 +240,9 @@ host = [8080, "9000:3000"]  # guest `localhost:3000` → host port 9000
 
 ### Host → guest (`guest = [...]`)
 
-The inverse: a service running *inside* the sandbox can be reached
-from the host. airlock binds a listener on `127.0.0.1:<host_port>` and
-every accepted connection is bridged to `127.0.0.1:<guest_port>`
+The inverse: the host can reach a service running *inside* the
+sandbox. airlock binds a listener on `127.0.0.1:<host_port>` and
+bridges every accepted connection to `127.0.0.1:<guest_port>`
 inside the guest.
 
 ```toml
@@ -249,26 +252,26 @@ guest = ["5000:4000"]  # host `127.0.0.1:5000` → guest `localhost:4000`
 
 Notes:
 
-- **Loopback only.** Listeners bind on `127.0.0.1`; the forward is
+- **Loopback only.** Listeners bind on `127.0.0.1`. The forward is
   not reachable from the LAN.
 - **No rules, no policy.** Host → guest traffic bypasses
   `allow`/`deny`/middleware entirely — the host is trusted, and
   `deny-always` does *not* block reverse forwards.
 - **Startup-time bind.** If the host port is already in use the
   sandbox fails to start with a clear error.
-- **Host-port collisions are an error.** Two `.guest` entries sharing
-  the same host port is rejected at startup.
+- **Host-port collisions are an error.** airlock rejects two `.guest`
+  entries that share the same host port at startup.
 
 ### Combined example
 
-Both directions can be declared side by side in the same group:
+You can declare both directions side by side in the same group:
 
 ```toml
 [network.ports.dev]
-host  = ["9000:3000"]   # host :9000 ← guest :3000
+host = ["9000:3000"]   # host :9000 ← guest :3000
 guest = ["5000:4000"]   # host :5000 → guest :4000
 ```
 
-Like other config entries, port forward groups can be disabled with
+Like other config entries, you can disable port forward groups with
 `enabled = false`.
 

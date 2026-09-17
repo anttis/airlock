@@ -16,16 +16,17 @@
 
 ---
 
-`airlock` is a command-line tool that tries to make running AI agents inside
-lightweight sandbox VMs so simple and smooth that there's never a good reason
-to run them on the host machine anymore. The main design principles are:
+`airlock` is a command-line tool that runs AI agents inside lightweight
+sandbox VMs. It aims to make this so simple and smooth that there is never
+a good reason to run agents on the host machine. The main design principles
+are:
 
 * **No installation hassle** — a single self-contained binary, installed with
   one command, no extra dependencies
 * **Lightweight and fast** — the sandbox should feel like a normal terminal
   tool: boots in seconds, minimal virtualization overhead
-* **Project and tech stack agnostic** — no assumptions about your tooling;
-  flexible enough that everyone can tailor the sandbox to their needs
+* **Project and tech stack agnostic** — no assumptions about your tooling.
+  Flexible enough that everyone can tailor the sandbox to their needs
 * **Shareable** — sandbox configuration lives in version control and can be
   shared across a team or company
 
@@ -76,24 +77,25 @@ that even the laziest of us actually follow them.
 
 ### VM-isolated sandboxes from any Linux OCI image
 
-airlock boots a lightweight Linux VM using
+airlock starts a lightweight Linux VM using
 [Apple Virtualization](https://developer.apple.com/documentation/virtualization)
 on macOS or [Cloud Hypervisor](https://www.cloudhypervisor.org/) + KVM on
-Linux. The VM kernel and initramfs are embedded in the binary — there's
-nothing else to install.
+Linux. The binary embeds the VM kernel and initramfs — there is nothing
+else to install.
 
-Before booting the VM, airlock pulls an OCI image (from a registry or local
-Docker daemon), shares its layers into the VM via VirtioFS, and assembles an
-overlayfs root filesystem inside the guest. The image can be anything: Ubuntu, Alpine,
-Fedora, a custom CI image — if it runs on Linux, it works.
+Before the VM is started, airlock pulls an OCI image from a registry or a
+local Docker daemon. It then shares the image layers into the VM via VirtioFS
+and assembles an overlayfs root filesystem inside the guest. The image can be
+anything: Ubuntu, Alpine, Fedora, a custom CI image — if it runs on Linux,
+it works.
 
-* Pull images from any reachable OCI registry (authentication supported via
-  the built-in vault backed by the system keyring) — no Docker required
+* Pull images from any reachable OCI registry (the built-in vault, backed by
+  the system keyring, handles registry authentication) — no Docker required
 * Or use images from a local Docker daemon if you have one
 * Selectively expose host environment variables into the VM
 * Share host directories via fast VirtioFS mounts (bidirectional sync,
   read-only option available)
-* Near-native speed ext4 block device for persistent VM state (installed
+* ext4 block device with near-native speed for persistent VM state (installed
   packages, caches like `node_modules` or `~/.cargo/registry`)
 
 ### Full network control
@@ -105,8 +107,8 @@ control.
 
 * Configurable allow/deny rules with wildcard host and port matching
 * Transparent TLS interception (MITM) for rules with Lua middleware —
-  a per-project root CA is generated automatically and installed into the
-  VM's system certificate store
+  airlock generates a per-project root CA automatically and installs it
+  into the VM's system certificate store
 * Lua-scriptable HTTP request and response modification (inject headers,
   rewrite requests, conditionally deny)
 * HTTP/2 and ALPN support
@@ -119,13 +121,7 @@ Sandbox configuration lives in a plain `airlock.toml` at the project root.
 Check it into version control, and every team member gets the same sandbox
 setup — same image, same network rules, same mounts. Local overrides go in
 `airlock.local.toml` (gitignored). Built-in presets for common ecosystems
-(Rust, Python, Node.js, and more) provide sensible defaults out of the box.
-
-## Coming up next!
-
-* MCP proxy for stdio-based MCP servers (e.g. Playwright MCP from inside the VM)
-* System-admin-managed configuration defaults and policies
-* Network configuration editing from the Monitor dashboard
+(Rust, Python, Node.js, and more) provide sensible defaults.
 
 ## Similar projects
 
@@ -133,9 +129,9 @@ There are several tools in this space, each with a different focus. Here's how
 airlock compares:
 
 * [Microsandbox](https://github.com/microsandbox/microsandbox) — the closest
-  open-source alternative. To be honest, this is a very promising project with
-  very similar ideology and feature set. It focuses a bit more on being an SDK
-  for programmatic usage whereas airlock focuses on pure terminal cli, but
+  open-source alternative. A very promising project with a very similar
+  ideology and feature set. It focuses a bit more on being an SDK for
+  programmatic usage whereas airlock focuses on a pure terminal CLI, but
   Microsandbox has a very decent CLI as well.
 * [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) — microVM-based
   sandboxes with a deny-by-default network proxy, per-sandbox Docker daemon,
@@ -145,7 +141,7 @@ airlock compares:
 * [OpenShell](https://github.com/NVIDIA/OpenShell) — NVIDIA's sandbox for AI
   agents using Docker containers with declarative YAML policies for filesystem,
   network (L4 + L7), and process access. Hot-reloadable, shareable policies.
-  Requires Docker; container-level isolation, not VM.
+  Requires Docker. Container-level isolation, not VM.
 * [nsjail](https://github.com/google/nsjail) — Google's lightweight process
   sandbox using Linux namespaces and seccomp-bpf. Single binary with a BPF
   policy language (conceptually similar to airlock's Lua scripting). Process-level

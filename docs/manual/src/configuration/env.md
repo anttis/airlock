@@ -1,7 +1,7 @@
 # Environment variables
 
-The `[env]` section defines environment variables that are injected into the
-container at startup. This is the primary mechanism for passing configuration
+The `[env]` section defines environment variables that airlock injects into
+the container at startup. This is the primary mechanism for passing configuration
 and secrets from the host into the sandbox.
 
 ## Static values
@@ -35,14 +35,14 @@ You can provide a fallback value with `${VAR:default}`:
 LOG_LEVEL = "${LOG_LEVEL:info}"
 ```
 
-Substitution is handled by the [`subst`](https://github.com/fizyr/subst)
-crate — see its docs for the full reference on escaping, nested
-expansions, and other forms.
+The [`subst`](https://github.com/fizyr/subst) crate handles substitution
+— see its docs for the full reference on escaping, nested expansions,
+and other forms.
 
 ## Secrets
 
-Values you don't want to keep in your shell environment can be saved in
-the airlock secret vault and referenced by the same `${VAR}` syntax.
+You can save values you don't want in your shell environment to the
+airlock secret vault, then reference them with the same `${VAR}` syntax.
 See the [Secrets management](../secrets.md) chapter for the full
 reference — storage backends, trade-offs, and recommendations.
 
@@ -61,8 +61,8 @@ every start. The real value stays on the host. To use the secret, list it
 in a network rule's [`inject`](network.md#injecting-masked-secrets), which
 swaps the surrogate for the real value in HTTP request headers.
 
-- The table form accepts only `value` and `mask`; any other key is an error.
-- `value` is substituted first (`${VAR}` works as usual), then masked.
+- The table form accepts only `value` and `mask` — any other key is an error.
+- airlock substitutes `value` first (`${VAR}` works as usual), then masks it.
 - A later config layer that writes the plain string form only replaces the
-  value; the entry stays masked. Set `mask = false` to unmask.
+  value — the entry stays masked. Set `mask = false` to unmask.
 - Daemons and `airlock exec` see the surrogate too.

@@ -3,16 +3,16 @@
 All outbound network access from the VM goes through a host-side
 proxy. There is no route from the VM to the outside world except via
 two vsock RPC connections — the kernel is built without a real
-egress NIC, and every outbound TCP connection is intercepted by a
-userspace TCP/IP stack (smoltcp) running on an in-VM TUN device
-(`airlock0`). The TUN is wired as the VM's default route, so every
-packet that isn't loopback-local ends up in the proxy regardless of
-which netns it originated in (including Docker containers).
+egress NIC. A userspace TCP/IP stack (smoltcp) on an in-VM TUN device
+(`airlock0`) intercepts every outbound TCP connection. The TUN is
+wired as the VM's default route, so every packet that isn't
+loopback-local reaches the proxy regardless of which netns it
+originated in (including Docker containers).
 
 The host ↔ guest RPC is split across two vsock ports so bulk network
 traffic can never head-of-line-block interactive traffic:
 
-- `SUPERVISOR_PORT` — supervisor RPC, pty, logs, stats, daemon
+- `SUPERVISOR_PORT` — supervisor RPC, PTY, logs, stats, daemon
   control. Everything *except* network byte relays.
 - `NETWORK_PORT` — `NetworkProxy.connect` and its per-connection
   byte sinks. Independent socket buffers, independent `RpcSystem`,
@@ -34,8 +34,8 @@ container socket()/connect(host, port)
 The TUN-based approach replaced an earlier iptables `REDIRECT` design.
 The fatal flaw of iptables REDIRECT is that the OUTPUT chain only
 fires for *locally originated* traffic. Packets forwarded from a
-container netns traverse PREROUTING, not OUTPUT, so they never hit
-the rule and never reached the proxy. A TUN at the default route
+container netns traverse PREROUTING, not OUTPUT, so they never
+matched the rule and never reached the proxy. A TUN at the default route
 catches everything — no chain-matching subtleties.
 
 ## Virtual DNS
@@ -48,7 +48,7 @@ caches the bidirectional mapping.
 
 This matters because the proxy sees an IP, not a name. When the
 container `connect()`s to the synthetic IP, the packet routes via the
-TUN; smoltcp snoops the SYN and creates a listener for that specific
+TUN. smoltcp snoops the SYN and creates a listener for that specific
 `(dst_ip, dst_port)`. On accept, the proxy reverse-looks up the
 synthetic IP in the DNS cache and has the real hostname for policy
 evaluation and TLS SNI. This works uniformly for HTTP, HTTPS, and raw
@@ -64,8 +64,9 @@ Once the proxy has `(host, port)` it asks the CLI whether to allow the
 connection. The policy model is:
 
 - `allow-always` (default): skip rules, allow everything
-- `deny-always`: skip rules, deny everything — including port forwards
-  and socket forwarding
+- `deny-always`: skip rules, deny everything — including guest → host
+  port forwards and socket forwarding (host → guest reverse forwards
+  are unaffected)
 - `allow-by-default`: allow unless a rule explicitly denies
 - `deny-by-default`: deny unless a rule explicitly allows
 
@@ -75,7 +76,7 @@ When a rule-based policy is in effect, the decision proceeds:
 2. If any `allow` pattern matches → **allow**.
 3. Otherwise → follow `policy`.
 
-Rules are additive across config files and presets; `enabled = false`
+Rules are additive across config files and presets. `enabled = false`
 disables a rule (including one inherited from a preset).
 
 Pattern formats (same in `allow` and `deny`):
@@ -87,15 +88,15 @@ Pattern formats (same in `allow` and `deny`):
 - `*.suffix` — subdomain wildcard
 - `*` — match all (use only for development)
 
-The port must be a number or `*`. Anything else (`:8O80` with a letter O,
-`:https`, a trailing space) is rejected when the config is loaded, so a
-typo can never silently widen a rule to every port.
+The port must be a number or `*`. airlock rejects anything else (`:8O80`
+with a letter O, `:https`, a trailing space) when it loads the config, so
+a typo can never silently widen a rule to every port.
 
 ## TLS interception
 
-Per-project: a self-signed CA keypair is generated and stored in
-`.airlock/sandbox/ca.json`. The CA cert PEM is passed to the guest via
-the `start` RPC and injected into the rootfs by guest init — see
+airlock generates a self-signed CA keypair per project and stores it
+in `.airlock/sandbox/ca.json`. The `start` RPC passes the CA certificate PEM
+to the guest, and guest init injects it into the rootfs — see
 [Mounts / CA certificate injection](./mounts.md#ca-certificate-injection).
 
 All TLS logic runs **in the CLI**, not in the supervisor. The
@@ -106,12 +107,12 @@ forwarding over vsock. The CLI then:
    `tls-parser` to validate the TLS record header. First byte `0x16`
    is not sufficient — any non-TLS stream starting with that byte
    would false-positive.
-2. If a full ClientHello is recognised, the CLI terminates TLS with a
-   freshly minted cert (signed by the project CA, SNI-matched) and
+2. If the CLI recognizes a full ClientHello, it terminates TLS with a
+   freshly minted certificate (signed by the project CA, SNI-matched) and
    opens a second TLS connection to the real server. Crucially, the
    CLI negotiates **the same ALPN** the container negotiated — so an
    HTTP/2 client talks to an HTTP/2 server, not an h1/h2 mismatch.
-3. If the stream is not TLS, it's bridged as raw TCP.
+3. If the stream is not TLS, the CLI bridges it as raw TCP.
 
 This split (TCP relay in the guest, TLS in the host CLI) exists
 because an earlier design did MITM inside the supervisor: the
@@ -129,22 +130,22 @@ Middleware applies to any allowed connection whose `host:port`
 matches — regardless of which rule allowed it — so the same
 middleware can cover traffic from multiple rules without duplication.
 
-Scripts are compiled to bytecode at startup (zero per-request
-compilation overhead) and run per HTTP request/response. See
+airlock compiles scripts to bytecode at startup (zero per-request
+compilation overhead) and runs them per HTTP request/response. See
 [Network scripting](../advanced/network-scripting.md) for the
 scripting API.
 
 ## Secret injection
 
 At startup the CLI resolves `[env]` once and generates a same-length
-random surrogate for each masked entry; the guest gets the surrogate,
+random surrogate for each masked entry. The guest gets the surrogate,
 the host keeps the real value. Each injecting rule's allow patterns
 carry its secrets, resolved per connection like middleware.
 
 Per HTTP request the proxy does a byte-level search/replace on header
 values: surrogate → real before the Lua chain, real → surrogate after
-it. Longer values are replaced first so nested secrets cannot leak.
-Header names, URI and bodies are untouched.
+it. The proxy replaces longer values first so nested secrets cannot
+leak. Header names, URI and bodies are untouched.
 
 ## Localhost port forwarding
 
@@ -161,13 +162,13 @@ whatever is listening on the VM's loopback.
 
 ## Unix socket forwarding
 
-Host Unix sockets are forwarded into the container. When a process in
+airlock forwards host Unix sockets into the container. When a process in
 the container connects to the guest socket path, the supervisor sends
 the guest path to the CLI via `NetworkProxy.connect(socket=…)`. The
 CLI maps guest path → host path using a pre-built `socket_map` (with
 tilde expansion applied at setup time) and opens a connection to the
 host socket.
 
-`~` in guest paths is expanded to the container home directory (read
-from the image's `/etc/passwd`). `~` in host paths is expanded to the
+`~` in guest paths expands to the container home directory (read
+from the image's `/etc/passwd`). `~` in host paths expands to the
 host user's home directory.

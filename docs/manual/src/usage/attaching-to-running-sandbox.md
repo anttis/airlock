@@ -24,25 +24,34 @@ airlock exec python3 -m pytest tests/
 
 ## Working directory
 
-`airlock exec` walks up from the current directory to find the
-sandbox's `.airlock/sandbox/cli.sock` and runs the command in the
-same directory inside the VM. To override, use `--cwd` (or `-w`):
+`airlock exec` can be used from any subdirectory under the sandbox
+root; `airlock exec` walks up from the current directory to find a
+running sandbox VM. The executed command has the same working
+directory as in the host machine. To override the directory, use `--cwd`
+(or `-w`):
 
 ```bash
-airlock exec -w /tmp ls -la
+# /home/example/my-project
+#   .airlock
+#   airlock.toml
+#   src 
+
+cd src
+airlock x pwd          # prints: /home/example/my-project/src
+airlock x -w /tmp pwd  # prints: /tmp
 ```
 
 ## Environment variables
 
-Extra environment variables can be passed with `-e` (repeatable):
+Pass extra environment variables with `-e` (repeatable):
 
 ```bash
 airlock exec -e DEBUG=1 -e LOG_LEVEL=trace ./run-tests.sh
 ```
 
-They're layered on top of the sandbox's resolved environment (image
-env + `airlock.toml` env); entries with the same key replace the
-base value.
+airlock layers them on top of the sandbox's resolved environment
+(image env + `airlock.toml` env). Entries with the same key replace
+the base value.
 
 ## Login shell
 

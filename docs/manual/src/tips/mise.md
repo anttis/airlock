@@ -93,7 +93,7 @@ export INTERNAL_API_KEY="key-..."
 ```
 
 These variables are available to every mise task in the project. When a task
-starts airlock, the sandbox config picks them up through `${VAR}` references:
+starts airlock, the sandbox config reads them through `${VAR}` references:
 
 ```toml
 # airlock.toml
@@ -102,5 +102,5 @@ INTERNAL_API_KEY = "${INTERNAL_API_KEY}"
 ```
 
 This keeps secrets out of version control entirely — they live in a local
-file on each developer's machine, loaded through mise, and forwarded into
-the sandbox by airlock.
+file on each developer's machine. mise loads them, and airlock forwards
+them into the sandbox.

@@ -1,9 +1,9 @@
 # Vibe coding configuration
 
-Airlock's configuration system is [hierarchical](../configuration.md#file-hierarchy).
+airlock's configuration system is [hierarchical](../configuration.md#file-hierarchy).
 That means you can put user-level settings in `~/.airlock/config.toml`
 or `~/.airlock.toml`, and they will apply to every project sandbox by
-default (and be overridden by per-project configuration where present).
+default. Per-project configuration overrides them where present.
 
 This is especially handy if you want to "vibe code" and just point your
 agent at a random directory without any extra setup. Since airlock can
@@ -66,7 +66,7 @@ run = "docker build -t vibe:local -f vibe.dockerfile ."
 [tasks.vibe]
 depends = ["vibe:image"]
 tools = { "github:milankinen/airlock" = "latest" }
-description = "Start my vibe conding sandbox"
+description = "Start my vibe coding sandbox"
 quiet = true
 raw = true
 dir = "{{ cwd }}"

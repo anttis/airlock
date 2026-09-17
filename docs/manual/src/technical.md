@@ -1,67 +1,77 @@
 # Technical implementation
 
-These pages describe how airlock is put together internally — the
-virtualization layer, the RPC protocol between host and guest, the
-guest init sequence, how mounts and networking are wired up, and the
-on-disk layout of sandbox and cache state.
+These pages describe airlock's internal structure — the virtualization
+layer, the RPC protocol between host and guest, the guest init
+sequence, the mount and network plumbing, and the on-disk layout of
+sandbox and cache state.
 
-Most users will never need any of this; it's documented for
-contributors, people debugging unusual failures, and anyone evaluating
-the security model in detail.
+Most users will never need any of this. These pages exist for
+contributors, for people debugging unusual failures, and for anyone
+evaluating the security model in detail.
 
 ## Overview
 
 airlock runs untrusted code inside a lightweight Linux VM. A single
-`airlock` binary boots a VM, pulls an OCI container image, assembles
-an overlayfs rootfs, and gives the user an interactive shell (or runs
-a one-off command) inside the container. The VM provides
-hardware-level isolation; the container provides a familiar
+`airlock` binary starts a VM, pulls an OCI container image, and
+assembles an overlayfs rootfs. It then gives the user an interactive
+shell (or runs a one-off command) inside the container. The VM
+provides hardware-level isolation. The container provides a familiar
 image-based environment.
 
-### One vsock, one RPC connection
+### RPC over vsock, nothing else
 
 The central design decision: the host process and the in-VM
-supervisor talk over a **single vsock connection** carrying a
-**single [Cap'n Proto](https://capnproto.org/) RPC session**. Every
-cross-boundary interaction — booting the container, attaching new
-processes, forwarding stdio, polling stats, bridging outbound TCP,
-streaming tracing logs — rides that one session.
+supervisor talk only over **[Cap'n Proto](https://capnproto.org/)
+RPC on vsock**. Two vsock connections exist. The supervisor channel
+(port 1024) carries every interactive interaction — starting the
+container, attaching new processes, forwarding stdio, polling stats,
+daemon control, streaming tracing logs. The network channel (port
+1025) carries outbound TCP bytes, so bulk transfers can never
+head-of-line-block the interactive traffic.
 
-Cap'n Proto specifically (over gRPC, JSON-RPC, or a bespoke framing):
-its zero-copy wire format keeps the stdio hot path cheap, it treats
-remote interfaces as first-class values (the supervisor calls outbound
-TCP through a *capability* the host handed it, not through a URL it
-could fabricate), and concurrent calls and streams are interleaved on
-one socket without any multiplexing glue of our own. See
+Why Cap'n Proto specifically, over gRPC, JSON-RPC, or a bespoke
+framing:
+
+- Its zero-copy wire format keeps the stdio hot path cheap.
+- It treats remote interfaces as first-class values — the supervisor
+  calls outbound TCP through a *capability* the host handed it, not
+  through a URL it could fabricate.
+- It interleaves concurrent calls and streams on one socket without
+  any multiplexing glue of our own.
+
+See
 [RPC Protocol / Why Cap'n Proto](./technical/rpc.md#why-capn-proto)
 for the detailed rationale.
 
 This shapes almost everything else:
 
-- **No second transport.** There is no virtio console for stdio, no
-  separate vsock port for networking, no control channel for
-  signals. Cap'n Proto RPC multiplexes many concurrent calls and
-  streams over the one connection, so a single `read()`/`write()`
-  loop in the supervisor is all the glue the VM needs.
-- **Capabilities as plumbing.** Streams like stdin, stdout polling,
-  and outbound TCP are modelled as Cap'n Proto *capabilities* passed
-  in as arguments. The supervisor doesn't need the host's identity
-  or address — it just calls back through the capability it was
-  handed. That means the VM has no egress path of any kind: the only
-  way out is an explicit capability the host chose to grant.
-- **No daemonless hidden state.** There is no airlock daemon on the
+- **No other transport.** There is no virtio console for stdio and
+  no control channel for signals. Cap'n Proto RPC multiplexes many
+  concurrent calls and streams over each connection. Simple
+  `read()`/`write()` loops in the supervisor are all the glue the VM
+  needs.
+- **Capabilities as plumbing.** The design models streams like stdin
+  and stdout polling as Cap'n Proto *capabilities* that the host
+  passes in as arguments. Outbound TCP goes through the
+  `NetworkProxy` capability, which the guest receives as the
+  bootstrap of the network channel. The supervisor doesn't need the
+  host's identity or address — it just calls back through the
+  capabilities it was handed. That means the VM has no egress path
+  of any kind: the only way out is an explicit capability the host
+  chose to grant.
+- **No daemon, no hidden state.** There is no airlock daemon on the
   host, no shared socket directory, no broker. When the `airlock
-  start` process dies, the vsock closes, the supervisor exits, and
-  the VM is torn down. `airlock exec` is a thin client that reaches
+  start` process dies, the vsock connections close, the supervisor exits, and
+  the VM shuts down. `airlock exec` is a thin client that reaches
   the same session through a Unix-socket bridge in the running
   `airlock start` process.
 - **Same wire on every platform.** macOS uses host TCP (the Apple
   Virtualization framework's vsock surfaces that way) and Linux uses
-  real `AF_VSOCK`, but the RPC schema and the code paths above it
-  are identical.
+  real `AF_VSOCK`. The RPC schema and the code paths above it are
+  identical.
 
-The [RPC protocol](./technical/rpc.md) page has the full interface
-list; the rest of this chapter assumes this one-session model.
+The [RPC protocol](./technical/rpc.md) page describes the channels and
+interfaces. The rest of this chapter assumes this model.
 
 ### Components and channels
 
@@ -110,7 +120,7 @@ The static picture: what runs where, and how the pieces talk.
   <rect class="arch-box" x="396" y="30" width="354" height="360" rx="8"/>
   <rect class="arch-bg" x="396" y="30" width="354" height="360" rx="8"/>
   <rect x="408" y="22" width="138" height="18" class="arch-label-bg"/>
-  <text x="416" y="36" class="arch-title">VM (Linux, ARM64)</text>
+  <text x="416" y="36" class="arch-title">VM (Linux)</text>
   <rect class="arch-box" x="412" y="56" width="322" height="72" rx="6"/>
   <text x="428" y="80" class="arch-sub">init (initramfs)</text>
   <text x="428" y="102" class="arch-item">one-shot: mount shares, disk,</text>
@@ -118,7 +128,7 @@ The static picture: what runs where, and how the pieces talk.
   <rect class="arch-box" x="412" y="148" width="322" height="140" rx="6"/>
   <text x="428" y="172" class="arch-sub">airlockd (supervisor)</text>
   <g transform="translate(428, 196)">
-    <text class="arch-item" x="0" y="0">• vsock server :1024 (Cap'n Proto)</text>
+    <text class="arch-item" x="0" y="0">• vsock :1024 / :1025 (Cap'n Proto)</text>
     <text class="arch-item" x="0" y="22">• spawns + supervises container</text>
     <text class="arch-item" x="0" y="44">• bridges guest TCP ↔ host proxy</text>
     <text class="arch-item" x="0" y="66">• admin HTTP @ http://admin.airlock/</text>
@@ -146,22 +156,25 @@ The static picture: what runs where, and how the pieces talk.
 
 **Channels shown**
 
-- **vsock · RPC** — the single Cap'n Proto RPC connection between the
-  host `airlock start` process and the in-VM supervisor. Carries the
-  `start` call (process + mount config + CA), ongoing `exec` calls,
-  stats polling, deny notifications, stdio, and the `NetworkProxy`
-  capability the guest uses to dial out.
+- **vsock · RPC** — two Cap'n Proto RPC connections between the host
+  `airlock start` process and the in-VM supervisor. The supervisor
+  channel (port 1024) carries the `start` call (process + mount
+  config + CA), ongoing `exec` calls, stats polling, deny
+  notifications, daemon control, and stdio. The network channel
+  (port 1025) carries `NetworkProxy.connect` and its per-connection
+  byte sinks — the guest receives `NetworkProxy` as that channel's
+  bootstrap capability.
 - **cli.sock** — Unix-domain Cap'n Proto connection from an `airlock
   exec` invocation to the CLI server embedded in the main process.
   The server merges override env onto the sandbox's resolved base env
   and forwards the call onto the existing vsock.
-- **VirtioFS** (not drawn) — each directory/file mount and the
-  per-layer OCI cache are exported as VirtioFS shares, mounted by
-  init at `/mnt/<tag>`, and bind-mounted into the rootfs.
+- **VirtioFS** (not drawn) — the host exports each directory/file
+  mount and the per-layer OCI cache as VirtioFS shares. init mounts
+  them at `/mnt/<tag>` and bind-mounts them into the rootfs.
 - **TUN → TCP proxy** (dashed) — all guest TCP egress routes through
   `airlock0`, a TUN device owned by the supervisor. A userspace TCP
-  stack (smoltcp) accepts each flow and dials back through
-  `NetworkProxy` on the vsock.
+  stack (smoltcp) accepts each flow and connects back through
+  `NetworkProxy` on the network channel.
 
 ### Startup flow
 
@@ -221,7 +234,7 @@ in time.
   <rect class="flow-event" x="450" y="236" width="160" height="28" rx="4"/>
   <text x="530" y="255" class="flow-text" text-anchor="middle">mount · disk · overlay · net</text>
   <rect class="flow-event" x="450" y="296" width="130" height="28" rx="4"/>
-  <text x="515" y="315" class="flow-text" text-anchor="middle">listen vsock :1024</text>
+  <text x="515" y="315" class="flow-text" text-anchor="middle">listen vsock :1024/:1025</text>
   <rect class="flow-event" x="520" y="116" width="90" height="28" rx="4"/>
   <text x="565" y="135" class="flow-text" text-anchor="middle">start RPC</text>
   <rect class="flow-event" x="590" y="296" width="110" height="28" rx="4"/>
@@ -242,8 +255,9 @@ in time.
 </svg>
 </div>
 
-Once the container is running, `airlock exec` reuses the same VM:
-the invocation walks up to `cli.sock`, hands `(cmd, args, cwd, env
-overrides)` to the CLI server, which merges the overrides onto the
-sandbox's base env and forwards the call over the existing vsock to
-`airlockd`, which forks a new process inside the container's chroot.
+Once the container is running, `airlock exec` reuses the same VM.
+The invocation walks up the directory tree to `cli.sock` and hands
+`(cmd, args, cwd, env overrides)` to the CLI server. The CLI server
+merges the overrides onto the sandbox's base env and forwards the
+call over the existing vsock to `airlockd`. `airlockd` forks a new
+process inside the container's chroot.

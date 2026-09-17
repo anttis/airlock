@@ -43,9 +43,9 @@ isolation guarantees if you're sandboxing untrusted code.
 
 For full isolation, you can run `dockerd` inside the VM. The airlock kernel
 ships with all the necessary support — cgroups v2, overlayfs, netfilter,
-namespaces, seccomp — so Docker works out of the box.
+namespaces, seccomp — so Docker works with no extra kernel setup.
 
-There are two things to set up: storage and the daemon process.
+You need to configure two things: storage and the daemon process.
 
 ### Storage
 
@@ -66,9 +66,9 @@ images and build cache survive reboots.
 
 ### Starting the daemon
 
-airlock's VM does not run systemd or any other init system beyond the
-lightweight `airlockd` supervisor. This means `dockerd` won't start
-automatically — you need to launch it yourself.
+airlock's VM does not run systemd or any other service manager. This
+means `dockerd` won't start automatically — you need to start it
+yourself.
 
 The simplest approach is to start it in the background before running your
 actual command:
@@ -127,13 +127,12 @@ capabilities they need to create namespaces and manage cgroups.
 
 ### Container networking
 
-Container egress works on the default Compose bridge — no `network_mode:
-host` workarounds needed. airlock's TCP proxy runs on a TUN device
-(`airlock0`) wired as the VM's default route, so every outbound packet
-ends up in the proxy regardless of which netns it came from. Docker's
-own bridge + MASQUERADE rules pass traffic through unchanged; the
-proxy just sees MASQUERADE'd source IPs (the VM's airlock0 address),
-which is fine because airlock keys policy on the *destination*.
+Container egress works on the default Compose bridge — you need no
+`network_mode: host` workarounds. airlock's network proxy captures
+every outbound packet regardless of which network namespace it came
+from. Docker's own bridge + MASQUERADE rules pass traffic through
+unchanged, and airlock keys policy on the *destination*, so the
+rewritten source addresses don't matter.
 
 Compose's service-name DNS works as expected (it's internal to the
 bridge network and never touches airlock's virtual DNS). Published

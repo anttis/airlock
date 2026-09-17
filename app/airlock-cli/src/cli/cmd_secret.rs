@@ -158,7 +158,7 @@ fn remove(vault: &Vault, name: &str) -> anyhow::Result<()> {
 fn confirm_plaintext_vault() -> anyhow::Result<()> {
     let msg = "\
 Your vault backend is \"file\" — secrets will be written as plaintext
-JSON to ~/.airlock/vault.json (mode 0600). Anyone with read access to
+JSON to ~/.airlock/vault.default.json (mode 0600). Anyone with read access to
 that file can recover them. For stronger at-rest protection, set one of
 these in ~/.airlock/settings.toml:
 

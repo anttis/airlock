@@ -1,9 +1,9 @@
 # Presets
 
-Presets are built-in configuration bundles that ship with airlock. Instead
-of manually listing every package registry and cache directory for your
-tech stack — or every API endpoint and credential mount for an AI agent —
-you pick the relevant presets and they handle the details.
+Presets are built-in configuration bundles that ship with airlock. Without
+them, you must list every package registry and cache directory for your tech
+stack, and every API endpoint and credential mount for an AI agent. With
+them, you pick the relevant bundles and they handle the details.
 
 ## Using presets
 
@@ -16,15 +16,14 @@ presets = ["debian", "rust", "claude-code"]
 image = "ubuntu:24.04"
 ```
 
-Presets are applied as a base layer; your own configuration always takes
-priority and overrides anything a preset defines. Multiple presets can be
-combined freely.
+airlock applies presets as a base layer. Your own configuration always takes
+priority and overrides anything a preset defines. You can combine multiple
+presets freely.
 
 ## Distribution presets
 
 These open network access to the package repositories for each Linux
-distribution so that `apt install`, `apk add`, and friends work out of the
-box.
+distribution so that commands like `apt install` and `apk add` work.
 
 - **`alpine`** — Alpine Linux package mirrors
 - **`debian`** — Debian and Ubuntu package repositories (including PPAs and
@@ -49,7 +48,7 @@ package manager can fetch dependencies.
 
 These configure network rules, credential forwarding, and settings mounts
 for popular AI coding agents. Each agent has its own chapter with the full
-setup — what the preset wires up, which secret or environment variable it
+setup — what the preset configures, which secret or environment variable it
 expects, and an example `airlock.toml`:
 
 - [Claude Code](./presets/claude-code.md)
@@ -84,7 +83,7 @@ req:setHeader("Authorization", "Bearer " .. env.TOKEN)
 '''
 ```
 
-This gives you Debian package repos, PyPI, Claude API access, and your
+This gives you Debian package repositories, PyPI, Claude API access, and your
 internal API — all in a deny-by-default sandbox.
 
 ## Overriding preset rules

@@ -12,20 +12,20 @@ is to retry, fall back to a different command, or invent a workaround
 — anything except telling the user "your sandbox policy blocked this,
 do you want to allow it?"
 
-The supervisor already knows when it denied a connection. The Claude
+airlock already knows when it denied a connection. The Claude
 Code [HTTP hooks protocol][ch-hooks] is the native way to feed that
-knowledge back into the agent: hooks fire on tool lifecycle events
+knowledge back into the agent. Hooks fire on tool lifecycle events
 and can inject extra context into the model's view of the failure.
 The endpoints below correlate denies with the tool calls that were
-in flight when they happened, and surface a short explanation to
+in flight when they happened. They surface a short explanation to
 Claude so it can stop and ask instead of retrying blindly.
 
 ## Endpoints
 
-The in-VM supervisor exposes an HTTP service at `http://admin.airlock/`
-— the hostname resolves to loopback via the guest DNS server, and
-loopback traffic bypasses the transparent proxy, so requests land on
-the supervisor directly. Three of the admin endpoints implement the
+The sandbox exposes an HTTP service at `http://admin.airlock/` inside
+the VM — the hostname resolves to loopback, and loopback traffic
+bypasses the transparent proxy, so requests reach the service
+directly. Three of the admin endpoints implement the
 hook protocol:
 
 | Path                                  | Claude hook event    | Behavior                                                                                         |
@@ -35,8 +35,8 @@ hook protocol:
 | `/claude/hooks/post-tool-use-failure` | `PostToolUseFailure` | If any deny was reported since the tool started, inject `additionalContext` explaining the block |
 
 The correlation is keyed on `tool_use_id`. The tracker holds up to
-1000 in-flight tool calls; if Claude doesn't fire a post-hook for a
-given id the entry is eventually evicted.
+1000 in-flight tool calls. If Claude doesn't fire a post-hook for a
+given id, the tracker eventually evicts the entry.
 
 ## Configuration
 
@@ -81,7 +81,7 @@ or globally in `~/.claude/settings.json`):
 ```
 
 Non-2xx responses and connection errors from the admin endpoints are
-non-blocking — if the supervisor is unreachable for any reason, tool
+non-blocking — if the service is unreachable for any reason, tool
 calls proceed as if the hooks weren't configured.
 
 [ch-hooks]: https://code.claude.com/docs/en/hooks

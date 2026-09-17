@@ -2,8 +2,8 @@
 
 The `--monitor` (`-m`) flag opens a tabbed TUI control panel alongside
 the sandbox shell. It's most useful when you want to observe what the
-sandbox is doing — which outbound connections it's making, which are
-being blocked by policy, and how it's using CPU and memory.
+sandbox is doing — which outbound connections it's making, which ones
+the policy blocks, and how it's using CPU and memory.
 
 ```bash
 airlock start --monitor
@@ -28,30 +28,30 @@ airlock start --monitor
 ### Network panel
 
 Two sub-tabs (newest entries at the top, up to 100 of each). Both have
-a gray header row naming the columns.
+a grey header row naming the columns.
 
 - **Requests** (default) — one row per HTTP request the middleware
   handled. Columns: `Received at`, `Endpoint` (method + path),
   `Target` (host:port), `Result` (`Allowed` green / `Denied` red).
-  Denied HTTP requests are included here too: the proxy captures the
-  full request before responding with `403 Forbidden` instead of
-  refusing at the TCP layer, so you can see exactly what was attempted.
-- **Connections** — one row per raw TCP connection. Columns: a colored
+  This list includes denied HTTP requests too. The proxy captures the
+  full request before it responds with `403 Forbidden`, instead of
+  refusing at the TCP layer. So you can see exactly what the sandbox
+  attempted.
+- **Connections** — one row per raw TCP connection. Columns: a coloured
   `⦿` bullet, `Target` (host:port, white), `Transferred`, `Connected at`,
   `Disconnected at`, `Result`. The bullet signals connection lifecycle:
   **green** means the connection is still open (`Disconnected at` is
-  blank), **gray** means it closed, **red** means the connection was
+  blank), **grey** means it closed, **red** means the connection was
   denied. A footer tracks running allow/deny counts.
 
 `Transferred` shows `↑ 4.2MB ↓ 61MB` — how much the sandbox sent and
 received on that connection, updating live. It's a measure of network
-traffic rather than of file size, so it counts protocol overhead too
-and will read a little above the size of whatever was actually
-downloaded. Narrow terminals drop the column to leave room for
-`Target`.
+traffic rather than of file size, so it counts protocol overhead too.
+It will read a little above the size of the actual download. Narrow
+terminals drop the column to leave room for `Target`.
 
 Use `↑` / `↓` to move the row selection (PgUp/PgDn, Home, End also
-work), and press `Enter` to open a **details** sub-tab with the full
+work). Press `Enter` to open a **details** sub-tab with the full
 snapshot. Close it with `Esc`, `x`, or the `×` in the tab label.
 
 For an HTTP request the details view shows the headers the sandbox
@@ -68,8 +68,8 @@ Switch sub-tabs with `r` / `c`, or click the sub-tab labels.
 
 The top-right of the network panel shows the active policy (e.g.
 `policy: Deny by default ▾`). Press `p` or click the label to open a
-dropdown and pick a new policy live — the change takes effect on the
-next connection the sandbox makes. Colors hint at the strictness:
+dropdown and pick a new policy live. The change takes effect on the
+next connection the sandbox makes. Colours hint at the strictness:
 green (`Always allow`), blue (`*-by-default`), red (`Always deny`).
 
 ### CPU widget
@@ -111,9 +111,9 @@ here, so there's nothing to set unless you want to change them.
 ### Buffer caps and scrollback
 
 The Monitor tab keeps a rolling buffer of recent network activity.
-Once either buffer fills up, the oldest entries are dropped to make
-room for new ones (the lifetime allowed/denied counters are not
-affected). The Sandbox tab's vt100 terminal keeps a separate
+Once either buffer is full, airlock drops the oldest entries to make
+room for new ones (this does not affect the lifetime allowed/denied
+counters). The Sandbox tab's vt100 terminal keeps a separate
 scrollback buffer.
 
 ```toml
@@ -123,16 +123,16 @@ tcp = 100   # default; max TCP connection entries
 scrollback = 1000  # default; vt100 scrollback rows for the Sandbox tab
 ```
 
-Bumping the buffers helps long sessions keep more history visible;
-bumping `scrollback` lets you scroll further back into long build
-output. Both are in-memory and don't persist across sandbox restarts.
+Larger buffers keep more history visible in long sessions. A larger
+`scrollback` lets you scroll further back into long build output.
+Both are in-memory and don't persist across sandbox restarts.
 
 ### Key bindings
 
 Shortcuts live in `[monitor.keys]` as an action-name → key(s) map.
-Each value is either a single key string or a list of keys. Only the
-actions you list here are overridden — the rest keep their defaults,
-so a single `back = "esc"` is a complete config.
+Each value is either a single key string or a list of keys. You
+override only the actions you list here — the rest keep their
+defaults. A single `back = "esc"` is a complete config.
 
 ```toml
 [monitor.keys]
@@ -166,10 +166,10 @@ open-policy = "p"                # open the network-policy dropdown
 
 Examples: `q`, `ctrl+d`, `shift+tab`, `f2`, `alt+enter`.
 
-`shift+<letter>` is treated the same as the lowercase letter — terminals
-emit shifted letters as plain uppercase chars without a separate modifier
-flag, so binding `shift+a` would never fire. Use a different modifier or
-key if you want a shifted variant.
+airlock treats `shift+<letter>` the same as the lowercase letter.
+Terminals emit shifted letters as plain uppercase chars without a
+separate modifier flag, so a `shift+a` binding would never fire. Use a
+different modifier or key if you want a shifted variant.
 
 #### Action semantics
 
@@ -186,9 +186,9 @@ The navigation actions (`select-*`, `toggle-sub-tab`, `open-policy`,
 `kill-sandbox`) only apply on the Monitor tab. The Sandbox tab is full
 keystroke passthrough — only the two `switch-*` shortcuts are intercepted.
 
-Invalid key strings (unknown modifier, unknown key name) are reported
-up front when the sandbox starts; airlock refuses to launch the TUI
-rather than silently dropping a binding.
+airlock reports invalid key strings (unknown modifier, unknown key
+name) when the sandbox starts. It refuses to start the TUI rather
+than silently drop a binding.
 
 ## Selecting text
 
@@ -207,16 +207,16 @@ Which modifier depends on your terminal:
 | VS Code                                                                           | `Option` on macOS, `Shift` elsewhere |
 | xterm, GNOME Terminal, Konsole, kitty, Alacritty, WezTerm, Windows Terminal, tmux | `Shift`                              |
 
-You don't have to memorise this. Click anywhere in the monitor and it
+You don't have to memorize this. Click anywhere in the monitor and it
 tells you, in the bar at the bottom:
 
 ```
 Hold Option to select text
 ```
 
-The hint appears for a couple of seconds after each click and then gets
-out of the way. It names the modifier for the terminal airlock detects
-you're using; if it can't tell, it says `Shift`, which is right almost
+The hint appears for a couple of seconds after each click and then
+disappears. It names the modifier for the terminal airlock detects
+you're using. If it can't tell, it says `Shift`, which is right almost
 everywhere.
 
 The same applies in the Monitor tab's **details** view when you want to

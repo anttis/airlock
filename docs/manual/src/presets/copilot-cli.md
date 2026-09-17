@@ -8,7 +8,7 @@ access to the GitHub endpoints Copilot actually uses.
 ## What the preset does
 
 The sandbox sees a same-length random surrogate in
-`COPILOT_GITHUB_TOKEN`, and airlock swaps in the real token at the
+`COPILOT_GITHUB_TOKEN`, and airlock inserts the real token at the
 host boundary.
 
 - **Your token stays on the host.** The variable is
@@ -18,10 +18,10 @@ host boundary.
 - **Only Copilot endpoints are reachable** (`github.com`,
   `api.github.com`, and `*.githubcopilot.com`). Everything else stays
   blocked by your deny-by-default policy.
-- **Your Copilot session survives.** `~/.copilot` is mapped to
+- **Your Copilot session survives.** `~/.copilot` maps to
   `~/.airlock/copilot-cli/` on the host, so Copilot CLI session state
   persists across sandboxes — configuration, interaction history, and
-  the session database all carry over.
+  the session database all persist.
 
 ## Example `airlock.toml`
 
@@ -52,8 +52,8 @@ airlock secrets add COPILOT_GITHUB_TOKEN
 ```
 
 Inside the sandbox, Copilot CLI sees a surrogate value in
-`COPILOT_GITHUB_TOKEN` — no `/login` step is needed. Airlock
-intercepts outgoing API requests at the host boundary and swaps in
+`COPILOT_GITHUB_TOKEN` — you don't need a `/login` step. airlock
+intercepts outgoing API requests at the host boundary and inserts
 the real token there. The actual credential never enters the sandbox.
 
 For more details on supported token types, see the

@@ -1,8 +1,8 @@
 # Tips and tricks
 
-This section collects practical patterns that come up often when working
-with airlock day-to-day. None of this is required reading, but it can
-save you some time.
+This section collects practical patterns that occur often in day-to-day
+work with airlock. None of this is required reading, but it can save
+you some time.
 
 [Pairing with mise](./tips/mise.md) shows how to use mise as a task runner
 alongside airlock — installing airlock as a mise tool, building local Docker
@@ -14,5 +14,5 @@ keeping `deny-by-default` in `airlock.toml`.
 
 [Docker inside the VM](./tips/docker.md) covers two approaches for running
 Docker containers inside an airlock sandbox: forwarding the host Docker
-socket (easy but comes with caveats) and running a full Docker engine inside
+socket (easy but has caveats) and running a full Docker engine inside
 the VM.

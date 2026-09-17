@@ -48,9 +48,9 @@ accepts it — with or without a tag:
 image = "ubuntu:24.04@sha256:8f9e08b6a0b1e0b0f1f2a3c4d5e6f708192a3b4c5d6e7f80912a3b4c5d6e7f80"
 ```
 
-The digest decides which image you get; the tag alongside it is just a label.
-Pin one when the sandbox should keep running the same image even if the tag is
-later re-pointed to something else.
+The digest decides which image you get. The tag alongside it is just a label.
+Pin one when the sandbox should keep running the same image even if the tag
+later moves to something else.
 
 If a local Docker image carries the same tag but isn't that exact image,
 airlock ignores it and pulls the pinned one instead.
@@ -70,11 +70,11 @@ pull-policy = "if-changed"
   goes unnoticed until you change the name or clear the cache.
 - `if-changed` — check on every start, and keep using the cached image only
   while it's still current. If it has changed you get the usual "Image has
-  changed" prompt, so nothing is re-created behind your back.
+  changed" prompt, so airlock never re-creates anything without asking.
 
-`if-changed` adds a short registry check to every start. If that check can't be
-made — no network, registry down — airlock asks whether to carry on with the
-image you already have. Scripted runs don't ask; they stop with an error.
+`if-changed` adds a short registry check to every start. If that check fails
+— no network, registry down — airlock asks whether to continue with the
+image you already have. Scripted runs don't ask — they stop with an error.
 
 A pinned digest ignores this setting, since a pinned image can't change.
 
@@ -94,22 +94,22 @@ The minimum is 512 MB, and the maximum is the total system RAM.
 
 ## Security hardening
 
-The VM boundary is already the primary isolation layer, but `harden`
-(enabled by default) adds a second belt inside the guest: namespace
-restrictions and the `no-new-privileges` flag on the container process.
-`no-new-privileges` means a setuid binary inside the sandbox can no longer
-elevate to root — useful against local-privilege-escalation tricks an
-agent might trip into, even though the blast radius is already confined
-to the VM.
+The VM boundary is the primary isolation layer, but airlock also applies
+some process-level hardening inside the VM: namespace restrictions and
+root elevation prevention. To disable the process-level hardening, override
+the `harden` field with `false`. Disable it only when a workload genuinely
+needs the broader kernel capabilities that `harden` removes.
 
 ```toml
 [vm]
-harden = true   # default
+harden = true   # default = true
 ```
 
-Disable it only when a workload genuinely needs the broader kernel
-capabilities it takes away — the most common case is running Docker
-inside the VM, which needs to create its own namespaces and mounts.
+## Custom kernel and initramfs
+
+The `kernel` and `initramfs` fields point airlock at external kernel and
+initramfs files instead of the bundled ones. See
+[Custom kernel](../advanced/custom-kernel.md) for when and how to use them.
 
 ## Nested KVM (Linux only)
 
@@ -121,8 +121,8 @@ guest so VMs running *inside* the sandbox get hardware acceleration:
 kvm = true
 ```
 
-This is what you need for, say, running `qemu-system-*` or another
-hypervisor from inside the sandbox without falling back to software
+You need this to run, say, `qemu-system-*` or another hypervisor
+from inside the sandbox without falling back to software
 emulation. It's only available on Linux and requires `/dev/kvm`
 access on the host — Apple Virtualization on macOS doesn't expose
 nested virt.

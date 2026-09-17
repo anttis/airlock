@@ -37,14 +37,14 @@ Network rules (default: deny):
 ## Removing sandbox state
 
 The `airlock remove` command removes the sandbox state for the current
-project. This deletes the `.airlock/sandbox/` directory, which includes the
-disk image, CA certificate, overlay data, and run logs:
+project. This removes the `.airlock/sandbox/` directory, which includes the
+disk image, the CA certificate, and other runtime state:
 
 ```bash
 airlock remove
 ```
 
-You'll be asked to confirm before anything is deleted. To skip the
+airlock asks you to confirm before it removes anything. To skip the
 confirmation prompt (useful in scripts), pass `--force`:
 
 ```bash
@@ -54,30 +54,32 @@ airlock remove --force
 The short alias `airlock rm` also works.
 
 After removal, running `airlock start` again creates a fresh sandbox from
-scratch — new disk, new CA cert, fresh image pull if needed. The project
-configuration files (`airlock.toml`, `airlock.local.toml`) are not affected.
+scratch — new disk, new CA certificate, fresh image pull if needed. Removal does
+not affect the project configuration files (`airlock.toml`,
+`airlock.local.toml`).
 
 ## The `.airlock/` directory
 
 Each project that uses airlock has a `.airlock/` directory at its root.
 Sandbox state lives inside the project (rather than in a global location
-like `~/.airlock/`) so that each checkout gets its own isolated sandbox —
-working on two branches in parallel, cloning the same repo twice, or
-`airlock rm`-ing a feature branch's state never touches anything else.
-The directory is automatically excluded from version control (it contains
-a `.gitignore` with `*`). Inside it, the `sandbox/` subdirectory holds
-all runtime state:
+like `~/.airlock/`) so that each checkout gets its own isolated sandbox.
+Work on two branches in parallel, clone the same repo twice, or
+`airlock rm` a feature branch's state — none of these touches anything
+else. The directory contains a `.gitignore` with `*`, which excludes it
+from version control automatically. Inside it, the `sandbox/`
+subdirectory holds all runtime state:
 
 | File / Directory | Purpose                                                         |
 |------------------|-----------------------------------------------------------------|
 | `lock`           | PID lock file preventing concurrent sandbox instances           |
 | `ca.json`        | Per-project CA certificate and private key for TLS interception |
 | `disk.img`       | Sparse ext4 disk image for persistent VM storage                |
-| `image`          | Hard link to the cached OCI image JSON (acts as the GC ref)     |
+| `image`          | Link to the cached OCI image                                    |
 | `cli.sock`       | Unix socket `airlock exec` connects to                          |
 | `run.json`       | Metadata from the last run (timestamp, working directory)       |
-| `run.log`        | `tracing` log from the last run                                 |
-| `overlay/`       | Staging directory for file-mount hard links                     |
+| `overlay/`       | Internal staging directory for file mounts                      |
+
+The `tracing` log lives one level up, at `.airlock/airlock.log`.
 
 You should never need to touch these files directly. If something goes wrong,
 `airlock rm` and a fresh `airlock start` is the cleanest recovery path.

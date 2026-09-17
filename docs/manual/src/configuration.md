@@ -1,23 +1,24 @@
 # Configuration
 
-airlock is configured through TOML files. The main configuration file is
-`airlock.toml` at the project root, and it's meant to be committed to version
-control so that every team member gets the same sandbox setup.
+You configure airlock through TOML files. The main configuration file is
+`airlock.toml` at the project root. Commit it to version control so that
+every team member gets the same sandbox setup.
 
 ## File hierarchy
 
-Configuration is loaded from up to four locations, with later files overriding
+airlock loads configuration from up to four locations. Later files override
 earlier ones:
 
-1. `~/.airlock/config.toml` or `~/.airlock.toml` — user-level settings (e.g. preferred CPU/memory)
-2. `airlock.toml` — project config (checked into version control)
-3. `airlock.local.toml` — local overrides (gitignored)
+1. `~/.airlock/config.toml` — user-level settings (e.g. preferred CPU/memory)
+2. `~/.airlock.toml` — alternative user-level settings file
+3. `airlock.toml` — project config (checked into version control)
+4. `airlock.local.toml` — local overrides (gitignored)
 
-This layering means a company can ship global defaults, individual developers
-can set personal preferences, and each project defines its own sandbox — with
-room for local tweaks that don't affect the team.
+This layering lets a company ship global defaults and each developer set
+personal preferences. Each project defines its own sandbox, with room for
+local tweaks that don't affect the team.
 
-JSON and YAML files are also accepted (e.g. `airlock.json`, `airlock.yaml`).
+airlock also accepts JSON and YAML files (e.g. `airlock.json`, `airlock.yaml`).
 For each slot, the first matching extension in the order `.toml`, `.json`,
 `.yaml`, `.yml` wins.
 
@@ -35,24 +36,24 @@ memory = "4 GB"
 ```
 
 This is enough to get a working sandbox. The `rust` preset adds network rules
-for `crates.io` and related hosts, so `cargo build` works out of the box.
+for `crates.io` and related hosts, so `cargo build` works with no extra rules.
 
 ## Sandbox state
 
-Sandbox runtime state (disk image, CA certificate, overlays, logs) is stored
-in `.airlock/` inside the project directory. This directory is automatically
-excluded from version control. Running `airlock rm` removes it entirely;
-`airlock start` recreates it from scratch.
+airlock stores sandbox runtime state (disk image, CA certificate, logs)
+in `.airlock/` inside the project directory. airlock automatically
+excludes this directory from version control. `airlock rm` removes it
+entirely. `airlock start` recreates it from scratch.
 
 ## Merging behaviour
 
-When multiple configuration files are present, they're merged with these
-rules:
+When multiple configuration files are present, airlock merges them with
+these rules:
 
-- Object fields are merged recursively (e.g. `[vm]` settings from different
-  files are combined, not replaced)
-- Arrays are concatenated (e.g. preset lists from different levels stack)
-- Scalar values are overridden by later files
+- Object fields merge recursively (e.g. `[vm]` settings from different
+  files combine, they do not replace each other)
+- Arrays concatenate (e.g. preset lists from different levels stack)
+- Later files override scalar values
 - A `null` value never overwrites an existing value
 
 This means you can set `vm.cpus = 2` in your user config and only override
@@ -65,9 +66,9 @@ socket forwards — has an `enabled` flag that defaults to `true`. Combined with
 the hierarchical config loading, this gives individuals full control over
 shared configurations.
 
-For example, if the project `airlock.toml` defines a mount and a network rule
-via a preset, a developer can disable either one in their `airlock.local.toml`
-without modifying the shared config:
+For example, a preset in the project `airlock.toml` can define a mount and
+a network rule. A developer can disable either one in their
+`airlock.local.toml` without modifying the shared config:
 
 ```toml
 # airlock.local.toml — personal overrides, not committed
@@ -80,6 +81,6 @@ enabled = false
 ```
 
 This works at every level. A company-wide global config can define baseline
-rules, a project config can add its own, and any developer can selectively
-disable what doesn't apply to them — all without editing files that belong to
+rules, and a project config can add its own. Any developer can selectively
+disable what doesn't apply to them, without editing files that belong to
 someone else.

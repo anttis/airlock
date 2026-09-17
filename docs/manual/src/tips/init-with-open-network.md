@@ -1,6 +1,6 @@
 # Open-network bootstrap
 
-A `deny-by-default` policy is what makes the sandbox safe, but a fresh
+A `deny-by-default` policy is what makes the sandbox safe. But a fresh
 sandbox typically first needs to fetch its tooling — `mise install`,
 `npm ci`, and the like — from registries and CDNs nobody wants to list
 as network rules.
@@ -13,8 +13,8 @@ airlock start --network=allow-always --login -- ./init.sh
 ```
 
 `--network` replaces the `[network] policy` value for that run only. Rules,
-middleware, port forwards, and socket forwards still apply, and nothing is
-written back to the config. The sandbox exits when `init.sh` finishes, so
+middleware, port forwards, and socket forwards still apply, and airlock
+writes nothing back to the config. The sandbox exits when `init.sh` finishes, so
 the open network lives exactly as long as the script.
 
 Then start the normal session, which uses the policy from the config again:

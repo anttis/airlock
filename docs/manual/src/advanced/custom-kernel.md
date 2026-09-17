@@ -6,8 +6,8 @@ started — no extra files to manage, and the kernel is known to work with the
 `airlockd` guest supervisor.
 
 For situations where the bundled kernel doesn't fit — custom drivers, a
-different kernel version, or a stripped-down build — airlock supports
-pointing to external kernel and initramfs files.
+different kernel version, or a stripped-down build — airlock can use
+external kernel and initramfs files.
 
 ## Configuration
 
@@ -19,7 +19,7 @@ kernel = "/path/to/vmlinux"
 initramfs = "/path/to/initramfs.cpio.gz"
 ```
 
-Both paths support `~` expansion and are resolved relative to the project
+Both paths support `~` expansion and resolve relative to the project
 directory. When these are set, airlock uses them instead of the bundled files.
 
 The kernel must be compatible with airlock's guest supervisor (`airlockd`).
@@ -53,8 +53,8 @@ curl -fsSL https://raw.githubusercontent.com/milankinen/airlock/main/install.sh 
 
 The official kernel build script lives at `app/vm-kernel/build.sh` in the
 repository. It downloads the configured Linux version, applies the airlock
-kernel config, and produces a kernel image and initramfs. Both x86_64 and
-ARM64 architectures are supported.
+kernel config, and produces a kernel image and initramfs. It supports both
+x86_64 and ARM64 architectures.
 
 If you're building a custom kernel from scratch, the key requirements are:
 
@@ -63,4 +63,4 @@ If you're building a custom kernel from scratch, the key requirements are:
 - ext4 filesystem support
 - Overlayfs support
 - The init system must be compatible with the `airlockd` supervisor binary
-  that gets packed into the initramfs
+  packed into the initramfs

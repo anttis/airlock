@@ -48,15 +48,16 @@ as present.
 
 ## TLS interception
 
-A per-project CA certificate is automatically generated and installed in the
-VM's system trust store the first time you start a sandbox. Processes inside
-the container see valid certificates for intercepted connections — no manual
-trust configuration is needed.
+airlock automatically generates a per-project CA certificate and installs
+it in the VM's system trust store the first time you start a sandbox.
+Processes inside the container see valid certificates for intercepted
+connections — you need no manual trust configuration.
 
-All allowed TLS connections are intercepted so requests are visible in the
-Monitor tab, regardless of whether a middleware script matches. Middleware
-runs only for connections that match its target; connections with no matching
-middleware are still MITM-decrypted but pass through unmodified.
+airlock intercepts all allowed TLS connections so requests are visible in
+the Monitor tab, regardless of whether a middleware script matches.
+Middleware runs only for connections that match its target. Connections
+with no matching middleware are still MITM-decrypted but pass through
+unmodified.
 
 ## Request API
 
@@ -100,9 +101,9 @@ if res.status == 200 then
 end
 ```
 
-If you don't call `req:send()` or `req:deny()`, the request is forwarded
-automatically when the script finishes — but you won't get access to the
-response.
+If you don't call `req:send()` or `req:deny()`, airlock forwards the
+request automatically when the script finishes — but you won't get access
+to the response.
 
 ## Response API
 
@@ -127,15 +128,15 @@ Both `req:body()` and `res:body()` return a Body object with these methods:
 | `body:json()`           | Parse as JSON, return a Lua table |
 | `body:len()` or `#body` | Byte length                       |
 
-When you call `req:setBody()` or `res:setBody()` with a Lua table, it's
-serialized as JSON automatically. The `Content-Length` header is updated to
-match the new body size.
+When you call `req:setBody()` or `res:setBody()` with a Lua table, airlock
+serializes it as JSON automatically and updates the `Content-Length` header
+to match the new body size.
 
-**Performance note:** request and response bodies are streamed lazily by
+**Performance note:** airlock streams request and response bodies lazily by
 default. Calling `req:body()` or `res:body()` reads the entire body into
 memory. For most API traffic this is fine, but be careful with endpoints
-that transfer large payloads — a multi-gigabyte upload or download will be
-fully materialized in the proxy's memory and could cause an out-of-memory
+that transfer large payloads — a multi-gigabyte upload or download
+materializes fully in the proxy's memory and could cause an out-of-memory
 crash. If you only need to inspect headers or the request path, avoid
 calling `body()` altogether.
 
@@ -160,13 +161,15 @@ log("request id: " .. req:header("X-Request-ID"))
 '''
 ```
 
-If any script calls `req:deny()`, the chain stops and the request is blocked.
+If any script calls `req:deny()`, the chain stops and airlock blocks the
+request.
 
 ### Masked secrets and middleware
 
-[Injected](../configuration/network.md#injecting-masked-secrets) secrets
-are unmasked in request headers before the first script runs and masked
-again in response headers after the last one returns.
+airlock unmasks
+[injected](../configuration/network.md#injecting-masked-secrets) secrets
+in request headers before the first script runs and masks them again in
+response headers after the last one returns.
 
 ## Examples
 

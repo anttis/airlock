@@ -4,7 +4,7 @@ This section covers topics that go beyond day-to-day sandbox configuration.
 Most users won't need any of this to get productive with airlock, but it's
 here when you do.
 
-[Network scripting](./advanced/network-scripting.md) walks through the Lua
+[Network scripting](./advanced/network-scripting.md) describes the Lua
 middleware API for inspecting and modifying HTTP traffic that passes through
 airlock's network proxy.
 

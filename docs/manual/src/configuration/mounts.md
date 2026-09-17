@@ -1,8 +1,8 @@
 # Mounts
 
 airlock can share host files and directories into the VM using VirtioFS
-mounts. The project directory is always mounted automatically at its exact
-host path, but you can add additional mounts for things like SSH config,
+mounts. airlock always mounts the project directory automatically at its
+exact host path. You can add more mounts for things like SSH config,
 credential files, or shared caches.
 
 ## Defining a mount
@@ -24,8 +24,8 @@ container. Both support `~` expansion to the respective home directory.
 The default home directory inside the sandbox comes from the OCI
 image's user record — typically `/root` for images that run as root.
 If you override `HOME` via [`[env]`](./env.md), `~` in mount targets
-expands to your value instead, so the path the file is mounted at
-matches what `$HOME/...` resolves to inside the shell:
+expands to your value instead. The mount path then matches what
+`$HOME/...` resolves to inside the shell:
 
 ```toml
 [env]
@@ -38,9 +38,9 @@ target = "~/.ssh/config"   # guest: /home/dev/.ssh/config
 
 Without the override, the same `target = "~/.ssh/config"` would mount
 at `/root/.ssh/config` while the shell's `$HOME` reported `/root` —
-either way, `~` and `$HOME` agree. The override is only needed when
-the image's home doesn't match where you actually want files to land
-(e.g. running as a non-root user the image doesn't ship with).
+either way, `~` and `$HOME` agree. You only need the override when
+the image's home doesn't match where you actually want the files
+(e.g. you run as a non-root user the image doesn't ship with).
 
 ## Read-only mounts
 
@@ -75,6 +75,10 @@ The available options are:
 - `create-dir` — create the source as a directory and mount it
 - `create-file` — create the source as a file and mount it
 
+When `create-dir` or `create-file` creates the source, `create_mode` sets
+its Unix permissions as an octal string (e.g. `"700"`). Defaults: `"755"`
+for directories, `"644"` for files.
+
 When using `create-file`, you can provide initial content for the new file:
 
 ```toml
@@ -87,7 +91,7 @@ file_content = "[user]\n\tname = Dev\n\temail = dev@example.com\n"
 
 ## Disabling a mount
 
-A mount can be temporarily disabled without removing it from the config. This
+You can disable a mount temporarily without removing it from the config. This
 is useful when a preset defines a mount that you don't need:
 
 ```toml

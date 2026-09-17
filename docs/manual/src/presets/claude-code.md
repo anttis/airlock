@@ -2,14 +2,14 @@
 
 The `claude-code` preset bundles the sandbox setup for running
 [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
-inside airlock. It wires up the network rules, credential handling,
-and settings persistence so you only need to pick an image that
-ships the `claude` CLI and drop the preset into your config.
+inside airlock. It configures the network rules, credential handling,
+and settings persistence. You only need to pick an image that ships
+the `claude` CLI and add the preset to your config.
 
 ## What the preset does
 
 The real OAuth token stays on the host. The VM sees a same-length
-random surrogate, and the real token is swapped in at the host
+random surrogate, and airlock inserts the real token at the host
 boundary.
 
 - **Your token stays on the host.** `CLAUDE_CODE_OAUTH_TOKEN` is
@@ -19,13 +19,13 @@ boundary.
 - **Only Anthropic endpoints are reachable** (`api.anthropic.com`,
   `claude.ai`, `downloads.claude.ai`, `platform.claude.com`).
   Everything else stays blocked by your deny-by-default policy.
-- **Claude knows it's sandboxed.** `IS_SANDBOX=1` is set so Claude
-  skips host-only behaviour, and `NODE_EXTRA_CA_CERTS` points at the
-  airlock CA so the middleware's TLS interception is trusted.
+- **Claude knows it's sandboxed.** The preset sets `IS_SANDBOX=1` so
+  Claude skips host-only behaviour, and points `NODE_EXTRA_CA_CERTS`
+  at the airlock CA so the middleware's TLS interception is trusted.
 - **Your onboarding survives.** `~/.claude` and `~/.claude.json`
   inside the sandbox are backed by `~/.airlock/claude/settings` and
   `~/.airlock/claude/claude.json` on the host, so login state,
-  preferences, and project memory carry over between sandbox runs.
+  preferences, and project memory persist between sandbox runs.
   Disable either mount in `airlock.local.toml` if you prefer a
   fresh sandbox each time.
 

@@ -5,8 +5,8 @@ They are useful for anything that needs to stay alive for the duration of
 the sandbox — a database, a language server, `dockerd` inside the VM, or
 a build watcher.
 
-Each daemon is declared as `[daemons.<name>]`. Daemons start just after
-the VM is ready and before the main shell, and are shut down cleanly
+You declare each daemon as `[daemons.<name>]`. Daemons start just after
+the VM is ready and before the main shell. They shut down cleanly
 when the main shell exits.
 
 ## Minimal example
@@ -18,8 +18,8 @@ command = ["redis-server", "/etc/redis.conf"]
 
 That is enough to keep a single Redis server running for the life of the
 sandbox. On crash it restarts (up to 10 times by default) with a one
-second delay per retry. When you exit the shell, it is sent `SIGTERM`
-and given 10 seconds to stop before being `SIGKILL`ed.
+second delay per retry. When you exit the shell, airlock sends it
+`SIGTERM` and gives it 10 seconds to stop before it sends `SIGKILL`.
 
 ## Full reference
 
@@ -57,19 +57,19 @@ Any other name is a config error. Default: `SIGTERM`.
 ### `timeout`
 
 Seconds to wait after `signal` before escalating to `SIGKILL`. `0` means
-wait forever — the `SIGKILL` step is skipped and airlock will block at
-shutdown until the daemon exits on its own. Default: `10`.
+wait forever — airlock skips the `SIGKILL` step and blocks at shutdown
+until the daemon exits on its own. Default: `10`.
 
 ### `restart`
 
 - `always` (default) — restart whenever the daemon exits, until
   `max_restarts` is reached.
 - `on-failure` — restart only on non-zero exit. A clean exit ends the
-  restart loop and the daemon is reported as "stopped".
+  restart loop, and airlock reports the daemon as "stopped".
 
 ### `max_restarts`
 
-Maximum number of restart attempts after the initial launch. `0` disables
+Maximum number of restart attempts after the initial start. `0` disables
 the cap. Default: `10`. Retries use linear backoff (`attempt_number` seconds).
 
 ### `harden`
@@ -85,12 +85,12 @@ Per-daemon environment variables. Supports the same `${VAR}` and
 `${VAR:default}` substitution as the top-level [`[env]`](./env.md)
 section, resolved from the host environment and the
 [secret vault](../secrets.md). Values declared here layer on top of
-the image's baseline environment; the daemon does not inherit the main
+the image's baseline environment. The daemon does not inherit the main
 shell's `[env]` entries.
 
 ## Logs
 
-Each daemon's stdout and stderr are redirected to files under
+airlock redirects each daemon's stdout and stderr to files under
 `/airlock/daemons/<name>/` inside the VM:
 
 ```
@@ -98,8 +98,8 @@ Each daemon's stdout and stderr are redirected to files under
 /airlock/daemons/<name>/stderr.log
 ```
 
-The log files are truncated each time the sandbox starts, and appended to
-across automatic restarts within a single session.
+airlock truncates the log files each time the sandbox starts and appends
+to them across automatic restarts within a single session.
 
 ## Shutdown
 
@@ -113,12 +113,12 @@ window and prints a final status line:
   ✓ daemon dockerd: killed
 ```
 
-`killed` means the daemon had to be `SIGKILL`ed; `shut down` means it
+`killed` means the daemon had to be `SIGKILL`ed. `shut down` means it
 exited on its own within the timeout.
 
 ## Disabling a daemon
 
-A daemon can be disabled without removing the entry from the config —
+You can disable a daemon without removing the entry from the config —
 useful when a preset defines one you don't need:
 
 ```toml
