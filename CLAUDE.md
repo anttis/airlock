@@ -29,6 +29,15 @@ IMPORTANT: Write temporary files **ALWAYS** to this project's `dev/tmp`
 directory instead of `/tmp`. Delete temporary files immediately
 after their use unless told otherwise.
 
+## User manual
+
+ALWAYS use `/asd-ste100` skill (STE-flavored mode) when editing manual
+pages. `intro.md` Motivation section exempt. Lint changed pages using
+`mise x -- python <linter-script-and-args>`.
+
+False positives: CSS/HTML in inline SVGs, "tl;dr"/"effortless" in
+Motivation. Passive-voice and tense findings are advisory.
+
 ## Development Log
 
 Log entries live in `docs/log/` as individual files named
