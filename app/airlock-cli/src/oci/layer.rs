@@ -162,6 +162,9 @@ fn extract_tarball_to_cache(
         Box::new(head.chain(reader))
     };
     let mut archive = tar::Archive::new(body);
+    // Preserve numeric image owners rather than assigning every entry to the
+    // extracting user. Hosts without permission to chown must fail extraction.
+    archive.set_preserve_ownerships(true);
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -326,6 +329,8 @@ mod tests {
             let mut b = tar::Builder::new(&mut gz);
             for (path, content) in entries {
                 let mut header = tar::Header::new_gnu();
+                header.set_uid(u64::from(unsafe { libc::getuid() }));
+                header.set_gid(u64::from(unsafe { libc::getgid() }));
                 header.set_size(content.len() as u64);
                 header.set_mode(0o644);
                 header.set_cksum();
@@ -344,6 +349,8 @@ mod tests {
             let mut b = tar::Builder::new(&mut buf);
             for (path, content) in entries {
                 let mut header = tar::Header::new_gnu();
+                header.set_uid(u64::from(unsafe { libc::getuid() }));
+                header.set_gid(u64::from(unsafe { libc::getgid() }));
                 header.set_size(content.len() as u64);
                 header.set_mode(0o644);
                 header.set_cksum();
@@ -639,10 +646,14 @@ mod tests {
         {
             let mut b = tar::Builder::new(&mut gz);
             let mut link = tar::Header::new_gnu();
+            link.set_uid(u64::from(unsafe { libc::getuid() }));
+            link.set_gid(u64::from(unsafe { libc::getgid() }));
             link.set_entry_type(tar::EntryType::Symlink);
             link.set_size(0);
             b.append_link(&mut link, "esc", &outside).unwrap();
             let mut wh = tar::Header::new_gnu();
+            wh.set_uid(u64::from(unsafe { libc::getuid() }));
+            wh.set_gid(u64::from(unsafe { libc::getgid() }));
             wh.set_size(0);
             wh.set_mode(0o644);
             wh.set_cksum();
@@ -662,6 +673,61 @@ mod tests {
             "whiteout escaped the extraction root and deleted a host file"
         );
         assert_eq!(std::fs::read(outside.join("victim")).unwrap(), b"precious");
+    }
+
+    /// Arbitrary numeric owners require root on a native Unix filesystem.
+    #[test]
+    #[ignore = "requires root and a filesystem that supports chown"]
+    fn extraction_preserves_numeric_ownership() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = tempfile_dir();
+        let tarball = tmp.join("ownership.tar");
+        let layer = tmp.join("layer");
+        let mut archive = tar::Builder::new(Vec::new());
+        for (path, uid, gid, kind) in [
+            ("root", 0, 0, tar::EntryType::Regular),
+            ("agent", 1234, 2345, tar::EntryType::Directory),
+            ("agent/file", 1234, 2345, tar::EntryType::Regular),
+            ("link", 1234, 2345, tar::EntryType::Symlink),
+            ("hardlink", 1234, 2345, tar::EntryType::Link),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_uid(uid);
+            header.set_gid(gid);
+            header.set_mode(0o755);
+            header.set_size(0);
+            header.set_entry_type(kind);
+            if kind.is_symlink() || kind.is_hard_link() {
+                archive
+                    .append_link(&mut header, path, "agent/file")
+                    .unwrap();
+            } else {
+                header.set_cksum();
+                archive.append_data(&mut header, path, &b""[..]).unwrap();
+            }
+        }
+        std::fs::write(&tarball, archive.into_inner().unwrap()).unwrap();
+        extract_tarball_to_cache(&layer, &tarball, None).unwrap();
+
+        let owners: Vec<_> = ["root", "agent", "agent/file", "link", "hardlink"]
+            .iter()
+            .map(|path| {
+                let metadata = std::fs::symlink_metadata(layer.join(path)).unwrap();
+                (metadata.uid(), metadata.gid())
+            })
+            .collect();
+        std::fs::remove_dir_all(&tmp).unwrap();
+        assert_eq!(
+            owners,
+            vec![
+                (0, 0),
+                (1234, 2345),
+                (1234, 2345),
+                (1234, 2345),
+                (1234, 2345)
+            ]
+        );
     }
 
     fn tempfile_dir() -> PathBuf {

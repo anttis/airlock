@@ -74,6 +74,14 @@ image without contacting the registry at all — a tag that has since moved
 goes unnoticed. Set `pull-policy = "if-changed"` (see [VM
 options](../configuration/vm.md)) to check for a newer image on every start.
 
+During extraction, airlock uses the numeric user and group IDs from the image
+archive. The host must permit these ownership changes, or extraction fails.
+An unprivileged host user can need additional permissions to extract an image.
+
+After an extraction-format update, airlock extracts the image layers again.
+This does not repair ownership in existing sandbox files. Use a fresh sandbox
+to test image ownership without changes from an earlier run.
+
 By default, airlock tries the local Docker daemon first and falls back to
 pulling from the OCI registry. Control this with the `resolution`
 field in the config:

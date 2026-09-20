@@ -138,7 +138,7 @@ mod tests {
         }
         let keys: Vec<String> = layers.iter().map(|d| cache::layer_key(d)).collect();
         let json = serde_json::json!({
-            "schema": "v2",
+            "schema": "v3",
             "image_id": digest,
             "name": "test",
             "image_layers": keys,

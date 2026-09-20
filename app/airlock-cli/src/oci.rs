@@ -285,15 +285,15 @@ async fn resolve_with_auth(
 }
 
 /// On-disk wrapper for a cached [`OciImage`]. Internally tagged so the JSON
-/// carries `"schema":"v2"` alongside the image fields. The schema version
+/// carries `"schema":"v3"` alongside the image fields. The schema version
 /// is bumped in lockstep with [`crate::cache::LAYER_FORMAT`] so a layer
 /// format change makes every old image JSON fail to deserialize and force
 /// a clean re-pull.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "schema")]
 enum CachedImage {
-    #[serde(rename = "v2")]
-    V2(OciImage),
+    #[serde(rename = "v3")]
+    V3(OciImage),
 }
 
 /// Read a cached image JSON file and unwrap it into an [`OciImage`]. Returns
@@ -302,7 +302,7 @@ enum CachedImage {
 fn read_cached_image(path: &Path) -> Option<OciImage> {
     let data = std::fs::read(path).ok()?;
     let wrapped: CachedImage = serde_json::from_slice(&data).ok()?;
-    let CachedImage::V2(image) = wrapped;
+    let CachedImage::V3(image) = wrapped;
     Some(image)
 }
 
@@ -368,7 +368,7 @@ fn write_cached_image(path: &Path, image: &OciImage) -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("tmp");
-    let bytes = serde_json::to_vec_pretty(&CachedImage::V2(image.clone()))?;
+    let bytes = serde_json::to_vec_pretty(&CachedImage::V3(image.clone()))?;
     std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -1591,7 +1591,7 @@ mod tests {
         let path = cache::image_path("sha256:legacy").unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let legacy = serde_json::json!({
-            "schema": "v2",
+            "schema": "v3",
             "image_id": "sha256:legacy",
             "name": "node:22",
             "image_layers": [cache::layer_key("sha256:L1")],

@@ -16,7 +16,10 @@ use sha2::{Digest, Sha256};
 /// staging file is prefixed with `{LAYER_FORMAT}.`, and the image JSON
 /// schema is bumped in lockstep so stale caches are ignored instead of
 /// silently poisoning fresh runs.
-pub const LAYER_FORMAT: u32 = 2;
+///
+/// Version 3 preserves numeric UID/GID from the image archives. Version 2
+/// trees discarded that metadata and must be extracted again.
+pub const LAYER_FORMAT: u32 = 3;
 
 /// Shared lock for tests that mutate the process-wide `HOME` env var.
 /// Any test that calls `std::env::set_var("HOME", …)` to redirect the
