@@ -74,9 +74,8 @@ image without contacting the registry at all — a tag that has since moved
 goes unnoticed. Set `pull-policy = "if-changed"` (see [VM
 options](../configuration/vm.md)) to check for a newer image on every start.
 
-By default, airlock tries the local Docker daemon first and falls back to
-pulling from the OCI registry. Control this with the `resolution`
-field in the config:
+By default, airlock searches Docker first, then Podman, and then pulls from
+the OCI registry. Control this with the `resolution` field in the config:
 
 ```toml
 # Always pull from the registry, skip Docker
@@ -85,11 +84,12 @@ name = "ubuntu:24.04"
 resolution = "registry"
 ```
 
-The three resolution modes are:
+The resolution modes are:
 
-- `auto` — try Docker daemon first, fall back to the registry (default)
-- `docker` — use the local Docker daemon only, and fail if the image isn't found
-- `registry` — always pull from the registry, ignore Docker
+- `auto` — search Docker, then Podman, then the registry (default)
+- `docker` — use local Docker images only, and fail if the image isn't found
+- `podman` — use local Podman images only, and fail if the image isn't found
+- `registry` — always pull from the registry, ignore local images
 
 For private registries, airlock prompts for a username and password the first
 time it sees a `401 Unauthorized` response. When the vault is enabled (see

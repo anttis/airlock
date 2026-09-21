@@ -90,11 +90,13 @@ pub mod config {
     #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
     #[serde(rename_all = "lowercase")]
     pub enum Resolution {
-        /// Try Docker daemon first, fall back to the registry (default).
+        /// Try local Docker images, then Podman, then the registry (default).
         #[default]
         Auto,
-        /// Only use the local Docker daemon.
+        /// Only use local Docker images.
         Docker,
+        /// Only use local Podman images.
+        Podman,
         /// Only pull from the OCI registry.
         Registry,
     }
@@ -139,7 +141,8 @@ pub mod config {
         /// A digest may be pinned with `@sha256:…`, optionally alongside a
         /// tag (`alpine:3.20@sha256:…`), as Docker tooling accepts.
         pub name: String,
-        /// Resolution strategy: `auto` (default), `docker`, or `registry`.
+        /// Resolution strategy: `auto` (default), `docker`, `podman`, or
+        /// `registry`.
         #[serde(default)]
         pub resolution: Resolution,
         /// Allow plain HTTP to the registry (for local or dev registries).

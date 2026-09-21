@@ -1,6 +1,7 @@
-//! Docker-daemon image export: check if an image exists locally and
-//! stream-split its `docker image save` output into per-layer tarballs
-//! staged under the shared layer cache.
+//! Local image export: check if an image exists in a container engine
+//! (`docker` or `podman`, both accept every subcommand used here) and
+//! stream-split its `image save` output into per-layer tarballs staged
+//! under the shared layer cache.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -12,6 +13,17 @@ use sha2::{Digest, Sha256};
 
 use super::OciConfig;
 use crate::cache;
+
+/// Digest hex of a blob member, or `None` for metadata. Docker 25+ writes
+/// `blobs/sha256/<hex>`; podman's `docker-archive` writes `<hex>.tar` and
+/// `<hex>.json`. Legacy `<id>/layer.tar` is not content-addressed.
+fn blob_hex(path: &str) -> Option<&str> {
+    let hex = path
+        .strip_prefix("blobs/sha256/")
+        .or_else(|| path.strip_suffix(".tar"))
+        .or_else(|| path.strip_suffix(".json"))?;
+    (hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then_some(hex)
+}
 
 /// Docker save manifest.json entry (Docker-specific, not OCI standard)
 #[derive(serde::Deserialize)]
@@ -37,8 +49,8 @@ pub struct DockerSave {
 /// Uses `docker images` instead of `docker image inspect` because
 /// Docker Desktop with containerd-snapshotting can list images but
 /// fail to inspect by tag.
-pub fn image_exists(image_ref: &str) -> Option<String> {
-    let output = Command::new("docker")
+pub fn image_exists(engine: &str, image_ref: &str) -> Option<String> {
+    let output = Command::new(engine)
         .args(["images", image_ref, "--format", "{{.ID}}", "--no-trunc"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -59,8 +71,8 @@ pub fn image_exists(image_ref: &str) -> Option<String> {
 }
 
 /// Returns the architecture of a locally available Docker image (e.g. "amd64", "arm64").
-pub fn image_arch(image_id: &str) -> Option<String> {
-    let output = Command::new("docker")
+pub fn image_arch(engine: &str, image_id: &str) -> Option<String> {
+    let output = Command::new(engine)
         .args([
             "image",
             "inspect",
@@ -80,17 +92,17 @@ pub fn image_arch(image_id: &str) -> Option<String> {
 }
 
 /// Returns the `USER` a local image's config declares (`""` when none).
-/// Fails when the daemon cannot be asked: the caller must not guess.
-pub fn image_user(image_id: &str) -> anyhow::Result<String> {
-    let output = Command::new("docker")
+/// Fails when the engine cannot be asked: the caller must not guess.
+pub fn image_user(engine: &str, image_id: &str) -> anyhow::Result<String> {
+    let output = Command::new(engine)
         .args(["image", "inspect", "--format", "{{.Config.User}}", image_id])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| anyhow::anyhow!("failed to run docker image inspect: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to run {engine} image inspect: {e}"))?;
     if !output.status.success() {
         anyhow::bail!(
-            "docker image inspect {image_id} failed: {}",
+            "{engine} image inspect {image_id} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -104,8 +116,8 @@ pub fn image_user(image_id: &str) -> anyhow::Result<String> {
 /// list is empty for images that were never pulled from (or pushed to) a
 /// registry — a locally built image has no registry identity, so a pin can
 /// never be satisfied from Docker alone.
-pub fn repo_digests(image_id: &str) -> Vec<String> {
-    let Ok(output) = Command::new("docker")
+pub fn repo_digests(engine: &str, image_id: &str) -> Vec<String> {
+    let Ok(output) = Command::new(engine)
         .args([
             "image",
             "inspect",
@@ -168,10 +180,10 @@ impl Drop for DockerSaveGuard {
 /// the docker child via a drop guard, so a cancelled future (e.g. Ctrl+C
 /// via a parent `tokio::select!`) kills docker, which closes stdout, which
 /// lets the detached blocking task finish promptly.
-pub async fn save_layer_tarballs(image_ref: &str) -> anyhow::Result<DockerSave> {
+pub async fn save_layer_tarballs(engine: &str, image_ref: &str) -> anyhow::Result<DockerSave> {
     let layers_root = cache::layers_root()?;
 
-    let mut child = Command::new("docker")
+    let mut child = Command::new(engine)
         .args(["image", "save", image_ref])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -233,7 +245,7 @@ fn save_from_stream<R: Read>(stdout: R, layers_root: &Path) -> anyhow::Result<Do
                 manifest_json = Some(serde_json::from_slice(&buf)?);
                 continue;
             }
-            let Some(hex) = path.strip_prefix("blobs/sha256/") else {
+            let Some(hex) = blob_hex(&path) else {
                 continue;
             };
             if !entry.header().entry_type().is_file() {
@@ -278,9 +290,7 @@ fn save_from_stream<R: Read>(stdout: R, layers_root: &Path) -> anyhow::Result<Do
             .and_then(|m| m.into_iter().next())
             .ok_or_else(|| anyhow::anyhow!("no manifest.json in docker save output"))?;
 
-        let config_hex = manifest
-            .config
-            .strip_prefix("blobs/sha256/")
+        let config_hex = blob_hex(&manifest.config)
             .unwrap_or(&manifest.config)
             .to_string();
         let config_tmp = staged
@@ -295,10 +305,7 @@ fn save_from_stream<R: Read>(stdout: R, layers_root: &Path) -> anyhow::Result<Do
         let mut layer_digests = Vec::with_capacity(manifest.layers.len());
         let mut seen: HashSet<String> = HashSet::new();
         for layer_ref in &manifest.layers {
-            let hex = layer_ref
-                .strip_prefix("blobs/sha256/")
-                .unwrap_or(layer_ref)
-                .to_string();
+            let hex = blob_hex(layer_ref).unwrap_or(layer_ref).to_string();
             let digest = format!("sha256:{hex}");
             layer_digests.push(digest.clone());
             if !seen.insert(hex.clone()) {
@@ -379,6 +386,60 @@ mod tests {
             copy_hashing(Cursor::new(Vec::new()), &mut empty).unwrap(),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    #[test]
+    fn blob_hex_recognises_oci_and_docker_archive_layouts() {
+        let hex = "a".repeat(64);
+        assert_eq!(blob_hex(&format!("blobs/sha256/{hex}")), Some(hex.as_str()));
+        assert_eq!(blob_hex(&format!("{hex}.tar")), Some(hex.as_str()));
+        assert_eq!(blob_hex(&format!("{hex}.json")), Some(hex.as_str()));
+        assert_eq!(blob_hex(&format!("{hex}/layer.tar")), None);
+        assert_eq!(blob_hex("index.json"), None);
+    }
+
+    #[test]
+    fn save_from_stream_accepts_podman_docker_archive_layout() {
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let home = temp_home();
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        let layers_root = cache::layers_root().unwrap();
+
+        let layer = b"layer bytes";
+        let layer_hex = hex::encode(Sha256::digest(layer));
+        let config = format!(
+            r#"{{"architecture":"amd64","os":"linux","rootfs":{{"type":"layers","diff_ids":["sha256:{layer_hex}"]}}}}"#
+        );
+        let config = config.as_bytes();
+        let config_hex = hex::encode(Sha256::digest(config));
+        let manifest = format!(
+            r#"[{{"Config":"{config_hex}.json","RepoTags":["localhost/x:1"],"Layers":["{layer_hex}.tar"]}}]"#
+        );
+        let tar = build_tar(&[
+            (&format!("{layer_hex}.tar"), layer),
+            (&format!("{config_hex}.json"), config),
+            ("manifest.json", manifest.as_bytes()),
+            ("repositories", b"{}"),
+        ]);
+
+        let save = save_from_stream(Cursor::new(tar), &layers_root).unwrap();
+        assert_eq!(save.layer_digests, vec![format!("sha256:{layer_hex}")]);
+
+        let download = layers_root.join(format!(
+            "{}.download",
+            cache::layer_key(&format!("sha256:{layer_hex}"))
+        ));
+        assert_eq!(std::fs::read(&download).unwrap(), layer);
+        let config_tmp = layers_root.join(format!(
+            "{}.download.tmp",
+            cache::layer_key(&format!("sha256:{config_hex}"))
+        ));
+        assert!(!config_tmp.exists());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
