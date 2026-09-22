@@ -23,11 +23,12 @@ resolution = "registry"
 
 The `resolution` field controls where airlock looks for the image:
 
-- `auto` (default) — try the local Docker daemon first, fall back to the OCI
-  registry. This is convenient if you already have the image locally.
-- `docker` — only use the local Docker daemon. Fails if the image isn't found.
-- `registry` — always pull from the OCI registry, ignore Docker entirely.
-  This is the right choice when Docker isn't installed.
+- `auto` (default) — search Docker first, then Podman, and then pull from the
+  OCI registry. This is convenient if you already have the image locally.
+- `docker` — use local Docker images only. Fails if the image isn't found.
+- `podman` — use local Podman images only. Fails if the image isn't found.
+- `registry` — always pull from the OCI registry, ignore local images.
+  This is the right choice when you have neither Docker nor Podman.
 
 For development registries served over plain HTTP, set `insecure = true`:
 

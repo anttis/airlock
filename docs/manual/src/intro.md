@@ -83,15 +83,15 @@ on macOS or [Cloud Hypervisor](https://www.cloudhypervisor.org/) + KVM on
 Linux. The binary embeds the VM kernel and initramfs — there is nothing
 else to install.
 
-Before the VM is started, airlock pulls an OCI image from a registry or a
-local Docker daemon. It then shares the image layers into the VM via VirtioFS
+Before the VM is started, airlock pulls an OCI image from a registry, Docker,
+or Podman. It then shares the image layers into the VM via VirtioFS
 and assembles an overlayfs root filesystem inside the guest. The image can be
 anything: Ubuntu, Alpine, Fedora, a custom CI image — if it runs on Linux,
 it works.
 
 * Pull images from any reachable OCI registry (the built-in vault, backed by
   the system keyring, handles registry authentication) — no Docker required
-* Or use images from a local Docker daemon if you have one
+* Or use local Docker or Podman images if you have them
 * Selectively expose host environment variables into the VM
 * Share host directories via fast VirtioFS mounts (bidirectional sync,
   read-only option available)

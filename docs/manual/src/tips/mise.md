@@ -24,9 +24,9 @@ the sandbox tool in one step.
 ## Building a local image with Docker
 
 Rather than pulling a generic base image, you can build a project-specific
-image with a Dockerfile and have airlock use it via the local Docker daemon.
-This is handy when your sandbox needs tools or system packages that aren't
-in the stock image.
+image with a Dockerfile and have airlock use it straight from Docker or
+Podman. This is handy when your sandbox needs tools or system packages
+that aren't in the stock image.
 
 Create a Dockerfile at the project root:
 

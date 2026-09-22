@@ -75,6 +75,18 @@ fn snake_case_pull_policy_is_accepted_too() {
 }
 
 #[test]
+fn podman_resolution_parses() {
+    let image = parse(
+        r#"
+        [image]
+        name = "alpine:latest"
+        resolution = "podman"
+    "#,
+    );
+    assert!(matches!(image.resolution, Resolution::Podman));
+}
+
+#[test]
 fn object_form_without_pull_policy_defaults() {
     let image = parse(
         r#"

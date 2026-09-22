@@ -629,8 +629,8 @@ fn check_legacy_user(stored: &OciImage, user: &str) -> anyhow::Result<LegacyUser
 }
 
 /// The `USER` string of a freshly resolved image. Registry resolution
-/// already carries the config; Docker resolution defers it to the export,
-/// so ask the daemon directly.
+/// already carries the config; local resolution defers it to the export,
+/// so ask the engine directly.
 fn resolved_user(resolved: &ResolvedImage) -> anyhow::Result<String> {
     match &resolved.source {
         ImageSource::Registry(_) => Ok(resolved
@@ -639,7 +639,7 @@ fn resolved_user(resolved: &ResolvedImage) -> anyhow::Result<String> {
             .as_ref()
             .and_then(|c| c.user.clone())
             .unwrap_or_default()),
-        ImageSource::Docker { .. } => docker::image_user(&resolved.digest),
+        ImageSource::Local { engine, .. } => docker::image_user(engine, &resolved.digest),
     }
 }
 
@@ -691,20 +691,29 @@ async fn resolve_image(
     let image_ref = image_cfg.name.as_str();
     let pinned = image_cfg.pinned_digest();
 
-    if !matches!(image_cfg.resolution, Resolution::Registry) {
-        match resolve_via_docker(image_ref, pinned) {
+    let engines: &[&str] = match image_cfg.resolution {
+        Resolution::Auto => &["docker", "podman"],
+        Resolution::Docker => &["docker"],
+        Resolution::Podman => &["podman"],
+        Resolution::Registry => &[],
+    };
+    let local_only = matches!(
+        image_cfg.resolution,
+        Resolution::Docker | Resolution::Podman
+    );
+    for engine in engines {
+        match resolve_local(engine, image_ref, pinned) {
             Ok(Some(resolved)) => return Ok(resolved),
-            // Present locally but unusable. Under `docker` there is nowhere
-            // else to look, so surface why rather than the generic not-found.
-            Err(reason) if matches!(image_cfg.resolution, Resolution::Docker) => {
-                anyhow::bail!("{reason}")
-            }
-            Err(reason) => cli::log!("  {} {reason} — trying registry", cli::bullet()),
+            // Present locally but unusable. With a single engine there is
+            // nowhere else to look, so surface why rather than the generic
+            // not-found.
+            Err(reason) if local_only => anyhow::bail!("{reason}"),
+            Err(reason) => cli::log!("  {} {reason} — trying next", cli::bullet()),
             Ok(None) => {}
         }
-        if matches!(image_cfg.resolution, Resolution::Docker) {
-            anyhow::bail!("image {image_ref} not found in Docker daemon");
-        }
+    }
+    if local_only {
+        anyhow::bail!("image {image_ref} not found in {}", engines[0]);
     }
 
     let reg = registry::resolve(image_ref, auth, image_cfg.insecure).await?;
@@ -731,12 +740,13 @@ async fn resolve_image(
     })
 }
 
-/// Try to satisfy the reference from the local Docker daemon.
+/// Try to satisfy the reference from the local `engine` (docker or podman).
 ///
-/// `Ok(None)` means the image simply isn't there; `Err(reason)` means it is,
-/// but can't be used — the caller decides whether that is fatal or just a
-/// reason to try the registry.
-fn resolve_via_docker(
+/// `Ok(None)` means the image simply isn't there (or the engine isn't
+/// installed); `Err(reason)` means it is, but can't be used — the caller
+/// decides whether that is fatal or just a reason to try the next source.
+fn resolve_local(
+    engine: &'static str,
     image_ref: &str,
     pinned: Option<&str>,
 ) -> Result<Option<ResolvedImage>, String> {
@@ -748,18 +758,20 @@ fn resolve_via_docker(
             .map_or(image_ref, |(name, _)| name),
         None => image_ref,
     };
-    let Some(image_id) = docker::image_exists(query_ref) else {
+    let Some(image_id) = docker::image_exists(engine, query_ref) else {
         return Ok(None);
     };
 
     // A local tag can point somewhere else entirely than the same tag in the
-    // registry, so a pinned digest must be checked against what the daemon
+    // registry, so a pinned digest must be checked against what the engine
     // recorded when it pulled the image — not assumed from the name.
     if let Some(want) = pinned
-        && !docker::repo_digests(&image_id).iter().any(|d| d == want)
+        && !docker::repo_digests(engine, &image_id)
+            .iter()
+            .any(|d| d == want)
     {
         return Err(format!(
-            "docker image {query_ref} does not match the pinned digest {want}"
+            "{engine} image {query_ref} does not match the pinned digest {want}"
         ));
     }
 
@@ -768,20 +780,21 @@ fn resolve_via_docker(
         "aarch64" => "arm64",
         other => other,
     };
-    let docker_arch = docker::image_arch(&image_id).unwrap_or_default();
-    if !docker_arch.is_empty() && docker_arch != host_arch {
-        return Err(format!("docker image is {docker_arch}, need {host_arch}"));
+    let image_arch = docker::image_arch(engine, &image_id).unwrap_or_default();
+    if !image_arch.is_empty() && image_arch != host_arch {
+        return Err(format!("{engine} image is {image_arch}, need {host_arch}"));
     }
 
     cli::log!(
-        "  {} image resolved via docker {}",
+        "  {} image resolved via {engine} {}",
         cli::check(),
         cli::dim(&image_id[..19.min(image_id.len())])
     );
     Ok(Some(ResolvedImage {
         digest: image_id,
         config: OciConfig::default(),
-        source: ImageSource::Docker {
+        source: ImageSource::Local {
+            engine,
             image_ref: query_ref.to_string(),
         },
     }))
@@ -800,7 +813,10 @@ struct ResolvedImage {
 }
 
 enum ImageSource {
-    Docker { image_ref: String },
+    Local {
+        engine: &'static str,
+        image_ref: String,
+    },
     Registry(Box<registry::RegistryImage>),
 }
 
@@ -833,9 +849,9 @@ async fn ensure_image(
     }
 
     let ordered_layers = match &resolved.source {
-        ImageSource::Docker { image_ref } => {
+        ImageSource::Local { engine, image_ref } => {
             let image_ref = image_ref.clone();
-            let (cfg, layers) = ensure_docker_image(&image_ref).await?;
+            let (cfg, layers) = ensure_local_image(engine, &image_ref).await?;
             resolved.config = cfg;
             layers
         }
@@ -859,12 +875,15 @@ async fn ensure_image(
 /// [`cli::interrupted`]; on Ctrl+C the docker child is killed via the
 /// save-side drop guard and the extract loop stops at the current layer.
 /// Any partial `.tmp/` extraction is left behind for the next sweep GC.
-async fn ensure_docker_image(image_ref: &str) -> anyhow::Result<(OciConfig, Vec<String>)> {
-    let sp = cli::spinner("exporting from docker...");
+async fn ensure_local_image(
+    engine: &'static str,
+    image_ref: &str,
+) -> anyhow::Result<(OciConfig, Vec<String>)> {
+    let sp = cli::spinner(&format!("exporting from {engine}..."));
 
     let image_ref = image_ref.to_string();
     let pipeline = async {
-        let save = docker::save_layer_tarballs(&image_ref).await?;
+        let save = docker::save_layer_tarballs(engine, &image_ref).await?;
         for digest in &save.layer_digests {
             let digest = digest.clone();
             tokio::task::spawn_blocking(move || {
@@ -872,7 +891,7 @@ async fn ensure_docker_image(image_ref: &str) -> anyhow::Result<(OciConfig, Vec<
                     &digest,
                     |_tmp| {
                         anyhow::bail!(
-                            "docker save stream did not include blob for layer {digest} \
+                            "{engine} save stream did not include blob for layer {digest} \
                              (manifest referenced a layer that was not in the export)"
                         )
                     },
@@ -893,7 +912,7 @@ async fn ensure_docker_image(image_ref: &str) -> anyhow::Result<(OciConfig, Vec<
     };
 
     sp.finish_and_clear();
-    cli::log!("  {} exported from docker", cli::check());
+    cli::log!("  {} exported from {engine}", cli::check());
 
     // Docker save manifests are bottom-up; overlayfs wants topmost first.
     let mut ordered: Vec<String> = save
