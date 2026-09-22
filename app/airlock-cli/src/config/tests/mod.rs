@@ -6,3 +6,4 @@ mod test_load;
 mod test_merge;
 mod test_network_targets;
 mod test_presets;
+mod test_vm;
