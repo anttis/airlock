@@ -179,7 +179,6 @@ pub async fn start(
         cloud_hypervisor: assets.cloud_hypervisor,
         #[cfg(target_os = "linux")]
         virtiofsd: assets.virtiofsd,
-        #[cfg(target_os = "linux")]
         kvm: project.config.vm.kvm,
     };
 

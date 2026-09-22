@@ -191,11 +191,6 @@ pub(super) fn parse_config(merged: serde_json::Value) -> anyhow::Result<Config> 
         }
     };
 
-    #[cfg(not(target_os = "linux"))]
-    if config.vm.kvm {
-        anyhow::bail!("kvm is only supported on Linux");
-    }
-
     validate_network(&config)?;
 
     Ok(config)

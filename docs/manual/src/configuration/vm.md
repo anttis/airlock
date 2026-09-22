@@ -112,19 +112,19 @@ The `kernel` and `initramfs` fields point airlock at external kernel and
 initramfs files instead of the bundled ones. See
 [Custom kernel](../advanced/custom-kernel.md) for when and how to use them.
 
-## Nested KVM (Linux only)
+## Nested KVM
 
-On Linux hosts with KVM support, you can expose `/dev/kvm` into the
-guest so VMs running *inside* the sandbox get hardware acceleration:
+Enable nested virtualization to run hardware-accelerated VMs inside the sandbox:
 
 ```toml
 [vm]
 kvm = true
 ```
 
-You need this to run, say, `qemu-system-*` or another hypervisor
-from inside the sandbox without falling back to software
-emulation. It's only available on Linux and requires `/dev/kvm`
-access on the host — Apple Virtualization on macOS doesn't expose
-nested virt.
+On Linux, the host requires `/dev/kvm` access and support for nested virtualization.
+On macOS, the host requires macOS 15 or later and an M3 or newer chip.
+Airlock checks Apple's support API and reports an error if the Mac cannot enable nested virtualization.
 
+The guest kernel must include KVM support. The bundled kernels include this support.
+Airlock exposes the guest's `/dev/kvm` inside the sandbox only when `kvm = true`.
+Restart the sandbox after you change this setting.

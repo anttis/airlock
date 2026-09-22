@@ -169,6 +169,17 @@ impl AppleVmBackend {
 
             // Platform
             let platform = VZGenericPlatformConfiguration::new();
+            if config.kvm {
+                anyhow::ensure!(
+                    objc2::available!(macos = 15.0),
+                    "vm.kvm requires macOS 15 or later"
+                );
+                anyhow::ensure!(
+                    VZGenericPlatformConfiguration::isNestedVirtualizationSupported(),
+                    "vm.kvm requires nested virtualization support on this Mac (M3 or later)"
+                );
+                platform.setNestedVirtualizationEnabled(true);
+            }
             vm_config.setPlatform(&platform.into_super());
 
             // Serial port (console) via pipes.

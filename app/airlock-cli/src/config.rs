@@ -323,7 +323,7 @@ pub mod config {
         #[serde(serialize_with = "ser_byte_size")]
         #[config(default = default_memory)]
         pub memory: ByteSize,
-        /// Enable KVM nested virtualization (Linux only)
+        /// Enable nested virtualization and expose KVM in the guest
         #[config(default)]
         pub kvm: bool,
         /// Apply security hardening to spawned processes (namespace isolation,
