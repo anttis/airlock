@@ -5,6 +5,10 @@
 # surrogate, and the `inject` rule below swaps the real value into request
 # headers to the Anthropic API at the host boundary.
 CLAUDE_CODE_OAUTH_TOKEN = { value = "${CLAUDE_CODE_OAUTH_TOKEN}", mask = true }
+
+# Telemetry endpoints are not allowed by netowork rules; disable telemetry entirely
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+
 # Tell that we're inside sandbox
 IS_SANDBOX = "1"
 # Claude uses Node certs - must add airlock CA to the trusted certs
