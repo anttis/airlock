@@ -1,7 +1,8 @@
 //! HTTP request interception via hyper.
 //!
 //! When the first bytes from the container look like HTTP, we hand off
-//! to hyper's auto-detecting HTTP server (h1/h2) and h1/h2 client.
+//! to a hyper HTTP server (h1 or h2, by the sniffed preface) and h1/h2
+//! client. HTTP/1.1 upgrades are handled in [`upgrade`].
 //! For each request, Lua scripts run and the (possibly modified) request
 //! is forwarded via hyper client. Bodies are streamed, not buffered.
 
@@ -10,21 +11,27 @@ mod executor;
 pub mod inject;
 pub mod middleware;
 mod senders;
+mod upgrade;
 
 use std::cell::RefCell;
+use std::pin::Pin;
 use std::rc::Rc;
 
+use anyhow::Context as _;
 use http_body_util::{Either, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
-use hyper::{Request, Response};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use hyper::{Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::task::JoinHandle;
 use tracing::{debug, trace};
 
 use crate::network::http::executor::LocalExecutor;
 use crate::network::http::senders::{H1Sender, H2Sender, RequestSender};
+use crate::network::http::upgrade::Upgrade;
 use crate::network::target::ResolvedTarget;
-use crate::network::{DenyReporter, io};
+use crate::network::{DenyReporter, io, tcp};
 
 const MAX_DETECT_SIZE: usize = 4096;
 
@@ -71,6 +78,15 @@ pub async fn detect(reader: &mut (impl AsyncRead + Unpin)) -> Result<Bytes, Byte
 
 type ResponseBody = Either<Incoming, Full<Bytes>>;
 
+/// hyper IO over a boxed read/write pair — both guest and upstream sides.
+type HyperIo = TokioIo<tokio::io::Join<io::BoxRead, io::BoxWrite>>;
+type H1UpstreamConn = hyper::client::conn::http1::Connection<HyperIo, ResponseBody>;
+
+/// The upstream connection task's output: the h1 connection object when
+/// the upstream speaks h1 (so it can be taken apart after an upgrade),
+/// `None` for h2.
+type UpstreamDone = Option<H1UpstreamConn>;
+
 /// Run hyper HTTP proxy with middleware interception.
 ///
 /// When `target.allowed` is false, `server` is a [`io::Transport::null`]
@@ -112,26 +128,18 @@ pub async fn relay(
 
     let server_io = hyper_util::rt::TokioIo::new(tokio::io::join(server.read, server.write));
     debug!("http proxy: server h2 = {}", server.h2);
+    let (sender, upstream) = connect_upstream(server_io, server.h2).await?;
 
-    let (sender, upstream_conn): (Rc<dyn RequestSender>, _) = if server.h2 {
-        let (sender, conn): (hyper::client::conn::http2::SendRequest<ResponseBody>, _) =
-            hyper::client::conn::http2::handshake(LocalExecutor, server_io).await?;
-        let handle = tokio::task::spawn_local(conn);
-        debug!("h2 client handshake complete");
-        (Rc::new(H2Sender(sender)), handle)
-    } else {
-        let (sender, conn): (hyper::client::conn::http1::SendRequest<ResponseBody>, _) =
-            hyper::client::conn::http1::handshake(server_io).await?;
-        let handle = tokio::task::spawn_local(conn);
-        debug!("h1 client handshake complete");
-        (Rc::new(H1Sender(RefCell::new(sender))), handle)
-    };
+    // Upgrades exist only in HTTP/1.1, and need it on both hops.
+    let upgradable = !container.h2 && !server.h2;
+    let upgrade = Rc::new(Upgrade::default());
 
     let middleware = target.middleware;
     let secrets = target.secrets;
     let target_host = target.host.clone();
     let target_port = target.port;
     let allowed = target.allowed;
+    let upgrade_shared = upgrade.clone();
     let service = service_fn(move |mut req: Request<Incoming>| {
         let sender = sender.clone();
         let middleware = middleware.clone();
@@ -139,14 +147,29 @@ pub async fn relay(
         let events = events.clone();
         let target_host = target_host.clone();
         let deny_reporter = deny_reporter.clone();
+        let upgrade = upgrade_shared.clone();
         async move {
             // The monitor sees the request as the guest sent it (surrogates
             // intact): the event is emitted before any secret is unmasked.
             let id = emit_request_event(&events, &req, &target_host, target_port, allowed);
+            let wants_upgrade = upgradable && Upgrade::wants(&req);
+            if wants_upgrade {
+                upgrade.requested();
+            }
+            let method = req.method().clone();
             let connect_host: std::rc::Rc<str> = std::rc::Rc::from(target_host.as_str());
-            let send = move |req| {
-                let sender = sender.clone();
-                async move { sender.send(req).await.map_err(|e| anyhow::anyhow!("{e}")) }
+            let send = {
+                let (upgrade, method) = (upgrade.clone(), method.clone());
+                move |req| {
+                    let sender = sender.clone();
+                    async move {
+                        let resp = sender.send(req).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+                        if wants_upgrade {
+                            upgrade.upstream_replied(&method, &resp);
+                        }
+                        Ok(resp)
+                    }
+                }
             };
             // Unmask before middleware so scripts observe the real request;
             // re-mask after middleware so nothing a script adds can carry the
@@ -160,47 +183,144 @@ pub async fn relay(
                     }),
             };
 
-            match result {
-                Ok(resp) => {
-                    emit_response_event(&events, id, &resp);
-                    Ok::<_, hyper::Error>(resp)
-                }
+            let mut resp = match result {
+                Ok(resp) => resp,
                 Err(e) => {
                     // The request was unmasked before middleware ran, so a
                     // script error that quotes a header may carry the real
                     // secret. Mask the text before it is logged or sent.
                     let msg = inject::mask_text(&e.to_string(), &secrets);
                     debug!("middleware error: {msg}");
-                    let resp = Response::builder()
-                        .status(502)
-                        .body(Either::Right(Full::new(Bytes::from(format!("{msg}\n")))))
-                        .unwrap();
-                    emit_response_event(&events, id, &resp);
-                    Ok(resp)
+                    text_response(StatusCode::BAD_GATEWAY, &format!("{msg}\n"))
                 }
+            };
+            if wants_upgrade {
+                upgrade.reply(&method, &mut resp);
             }
+            emit_response_event(&events, id, &resp);
+            Ok::<_, hyper::Error>(resp)
         }
     });
 
-    // Mirror upstream connection state: when the upstream server closes the
-    // connection, gracefully shut down the guest-side server so the guest
-    // sees a clean close and naturally reconnects. Without this, a stale
-    // sender produces "operation was canceled" 502s for every subsequent
-    // request on the same guest connection.
-    let builder = hyper_util::server::conn::auto::Builder::new(LocalExecutor);
-    let connection = builder.serve_connection(client_io, service);
-    let mut connection = std::pin::pin!(connection);
+    if container.h2 {
+        let guest = hyper::server::conn::http2::Builder::new(LocalExecutor)
+            .serve_connection(client_io, service);
+        let mut guest = std::pin::pin!(guest);
+        drive_guest(guest.as_mut(), upstream, &upgrade, |c| {
+            c.graceful_shutdown();
+        })
+        .await?;
+        return Ok(());
+    }
 
-    tokio::select! {
-        result = &mut connection => {
-            result.map_err(|e| anyhow::anyhow!("http proxy: {e}"))
+    let mut guest = hyper::server::conn::http1::Builder::new().serve_connection(client_io, service);
+    let upstream = drive_guest(Pin::new(&mut guest), upstream, &upgrade, |c| {
+        c.graceful_shutdown();
+    })
+    .await?;
+    if !upgrade.in_flight() {
+        return Ok(());
+    }
+    // hyper ends a connection that carried an upgrade request with
+    // `Dispatched::Upgrade`, switch or not, and leaves its socket open for
+    // us — plus whatever bytes it already read past the last message.
+    let guest = guest.into_parts();
+    let guest_buffered = guest.read_buf.len();
+    let mut guest = upgrade::transport(guest.io, guest.read_buf);
+    match upstream {
+        Some(Some(upstream)) if upgrade.switched() => {
+            let upstream = upstream.into_parts();
+            debug!(
+                "http upgrade: relaying raw bytes (guest buffered {guest_buffered}B, upstream buffered {}B)",
+                upstream.read_buf.len()
+            );
+            tcp::relay(guest, upgrade::transport(upstream.io, upstream.read_buf)).await;
         }
-        _ = upstream_conn => {
-            debug!("upstream connection closed, shutting down guest connection");
-            connection.as_mut().graceful_shutdown();
-            connection.await.map_err(|e| anyhow::anyhow!("http proxy shutdown: {e}"))
+        _ => {
+            // The reply carried `Connection: close`; make the close real.
+            let _ = guest.write.shutdown().await;
         }
     }
+    Ok(())
+}
+
+/// Handshake a hyper client on the upstream transport and drive it on its
+/// own task. The h1 task hands the connection object back when it ends:
+/// after an upgrade the socket is still open and the relay needs it.
+async fn connect_upstream(
+    server_io: HyperIo,
+    h2: bool,
+) -> anyhow::Result<(Rc<dyn RequestSender>, JoinHandle<UpstreamDone>)> {
+    if h2 {
+        let (sender, conn): (hyper::client::conn::http2::SendRequest<ResponseBody>, _) =
+            hyper::client::conn::http2::handshake(LocalExecutor, server_io).await?;
+        let task = tokio::task::spawn_local(async move {
+            if let Err(e) = conn.await {
+                debug!("upstream h2 connection: {e}");
+            }
+            None
+        });
+        debug!("h2 client handshake complete");
+        return Ok((Rc::new(H2Sender(sender)), task));
+    }
+    let (sender, mut conn): (hyper::client::conn::http1::SendRequest<ResponseBody>, _) =
+        hyper::client::conn::http1::handshake(server_io).await?;
+    let task = tokio::task::spawn_local(async move {
+        if let Err(e) = (&mut conn).await {
+            debug!("upstream h1 connection: {e}");
+        }
+        Some(conn)
+    });
+    debug!("h1 client handshake complete");
+    Ok((Rc::new(H1Sender(RefCell::new(sender))), task))
+}
+
+/// Serve the guest connection until it ends.
+///
+/// Mirrors an upstream close with a graceful shutdown, so the guest sees a
+/// clean close and reconnects instead of getting 502s from a stale sender.
+/// Not while an upgrade is in flight: the upstream h1 connection ends the
+/// moment it parses the 101, and a shutdown then makes hyper rewrite the
+/// 101's `Connection: upgrade` into `Connection: close`. The guest
+/// connection ends on its own in that case (see [`Upgrade::reply`]).
+///
+/// Returns the upstream task's output once the upstream is known to be
+/// done: it ended first, or the guest ended on a switch (the upstream
+/// stops on the same reply).
+async fn drive_guest<C>(
+    mut guest: Pin<&mut C>,
+    mut upstream: JoinHandle<UpstreamDone>,
+    upgrade: &Upgrade,
+    shutdown: fn(Pin<&mut C>),
+) -> anyhow::Result<Option<UpstreamDone>>
+where
+    C: Future<Output = hyper::Result<()>>,
+{
+    let done = tokio::select! {
+        result = guest.as_mut() => {
+            result.context("http proxy")?;
+            None
+        }
+        done = &mut upstream => {
+            if !upgrade.in_flight() {
+                debug!("upstream connection closed, shutting down guest connection");
+                shutdown(guest.as_mut());
+            }
+            guest.await.context("http proxy shutdown")?;
+            Some(done.context("upstream connection task")?)
+        }
+    };
+    match done {
+        None if upgrade.switched() => Ok(Some(upstream.await.context("upstream connection task")?)),
+        done => Ok(done),
+    }
+}
+
+fn text_response(status: StatusCode, body: &str) -> Response<ResponseBody> {
+    Response::builder()
+        .status(status)
+        .body(Either::Right(Full::new(Bytes::from(body.to_string()))))
+        .unwrap()
 }
 
 /// Broadcast a `NetworkEvent::Request` describing this HTTP request. Silently
@@ -299,10 +419,14 @@ fn is_http_request_line(line: &[u8]) -> bool {
 
     use regex::bytes::Regex;
 
-    static H2_PREFACE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^PRI \* HTTP/2\.0$").unwrap());
     static H1_REQUEST: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^[A-Z]+ \S+ HTTP/\S+$").unwrap());
 
-    H2_PREFACE.is_match(line) || H1_REQUEST.is_match(line)
+    is_h2_preface(line) || H1_REQUEST.is_match(line)
+}
+
+/// True when the sniffed first line is the HTTP/2 connection preface, i.e.
+/// the guest speaks h2 (by ALPN or prior knowledge) rather than h1.
+pub fn is_h2_preface(line: &[u8]) -> bool {
+    line.starts_with(b"PRI * HTTP/2.0")
 }

@@ -707,3 +707,66 @@ fn h2_container_h1_only_upstream() {
         },
     );
 }
+
+/// TLS [`upgrade_echo`] server (h1 only, like a WebSocket endpoint).
+async fn serve_upgrade_echo_tls(tls_config: Arc<rustls::ServerConfig>) -> std::net::SocketAddr {
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                if let Ok(tls_stream) = acceptor.accept(stream).await {
+                    upgrade_echo(tls_stream).await;
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// The Codex shape: a WebSocket client that offers no ALPN, talking
+/// through the MITM to an upstream that advertises h2 and http/1.1.
+#[test]
+fn tls_websocket_upgrade_relays_raw_bytes() {
+    let (server_tls, server_ca_pem) =
+        make_server_tls_with_alpn(vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
+
+    run_with_config(
+        TestNetworkConfig {
+            trust_cas: vec![server_ca_pem],
+            ..Default::default()
+        },
+        |proxy, _log, mitm_ca_pem| async move {
+            let addr = serve_upgrade_echo_tls(server_tls).await;
+            let conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
+                .await
+                .unwrap();
+
+            let mut root_store = rustls::RootCertStore::empty();
+            for cert in rustls_pemfile::certs(&mut mitm_ca_pem.as_bytes()) {
+                root_store.add(cert.unwrap()).unwrap();
+            }
+            let tls_config = rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth();
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+            let server_name = rustls::pki_types::ServerName::try_from("127.0.0.1").unwrap();
+            let mut tls_stream = connector
+                .connect(server_name, conn.into_stream())
+                .await
+                .unwrap();
+
+            assert_raw_relay(
+                &mut tls_stream,
+                &websocket_handshake(addr.port(), true),
+                "HTTP/1.1 101",
+            )
+            .await;
+        },
+    );
+}

@@ -2,6 +2,7 @@ use airlock_common::network_capnp::network_proxy;
 use axum::Router;
 use axum::extract::Path;
 use axum::routing::{get, post};
+use tokio::io::AsyncWriteExt;
 
 use super::helpers::*;
 
@@ -165,4 +166,123 @@ fn http_upstream_close_propagates_to_guest() {
             "should not get 502 after upstream close: {resp}"
         );
     });
+}
+
+// ── HTTP/1.1 Upgrade (WebSocket, CONNECT) ───────────────
+
+async fn upgrade_stream(proxy: &network_proxy::Client) -> (RpcStream, u16) {
+    let addr = serve_upgrade_echo().await;
+    let conn = TestConnection::connect(proxy, "127.0.0.1", addr.port())
+        .await
+        .unwrap();
+    (conn.into_stream(), addr.port())
+}
+
+#[test]
+fn websocket_upgrade_relays_raw_bytes() {
+    run_plain(|proxy| async move {
+        let (mut stream, port) = upgrade_stream(&proxy).await;
+        assert_raw_relay(
+            &mut stream,
+            &websocket_handshake(port, true),
+            "HTTP/1.1 101",
+        )
+        .await;
+    });
+}
+
+#[test]
+fn websocket_upgrade_through_middleware() {
+    with_noop_middleware(|proxy| async move {
+        let (mut stream, port) = upgrade_stream(&proxy).await;
+        assert_raw_relay(
+            &mut stream,
+            &websocket_handshake(port, true),
+            "HTTP/1.1 101",
+        )
+        .await;
+    });
+}
+
+#[test]
+fn connect_tunnel_relays_raw_bytes() {
+    run_plain(|proxy| async move {
+        let (mut stream, port) = upgrade_stream(&proxy).await;
+        let request =
+            format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+        assert_raw_relay(&mut stream, &request, "HTTP/1.1 200").await;
+    });
+}
+
+#[test]
+fn connect_answered_204_is_not_a_switch() {
+    // hyper's client keeps a CONNECT connection alive on 204 (no switch),
+    // and the upstream here never closes it. Treating 204 as a switch
+    // would leave the relay waiting on that idle connection forever.
+    run_plain(|proxy| async move {
+        let (mut stream, port) = upgrade_stream(&proxy).await;
+        let request = format!(
+            "CONNECT 127.0.0.1:{port} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-Reply: 204\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let resp = read_until_eof(&mut stream).await;
+        assert!(
+            resp.starts_with("HTTP/1.1 204"),
+            "expected 204, got: {resp}"
+        );
+        assert!(
+            resp.to_lowercase().contains("connection: close"),
+            "expected Connection: close, got: {resp}"
+        );
+    });
+}
+
+#[test]
+fn websocket_upgrade_rejected_by_upstream_closes_guest_connection() {
+    run_plain(|proxy| async move {
+        let (mut stream, port) = upgrade_stream(&proxy).await;
+        stream
+            .write_all(websocket_handshake(port, false).as_bytes())
+            .await
+            .unwrap();
+        // The upstream connection is spent after an upgrade attempt, so the
+        // reply must carry `Connection: close` and the stream must end.
+        let resp = read_until_eof(&mut stream).await;
+        assert!(
+            resp.starts_with("HTTP/1.1 400"),
+            "expected 400, got: {resp}"
+        );
+        assert!(
+            resp.to_lowercase().contains("connection: close"),
+            "expected Connection: close, got: {resp}"
+        );
+        assert!(resp.ends_with("not-upgrade"), "body: {resp}");
+    });
+}
+
+#[test]
+fn websocket_upgrade_forged_by_middleware_is_refused() {
+    // The upstream says 400; a script rewrites it to 101. There is no
+    // upstream stream to relay, so the guest must get a 502 and a close,
+    // not a 101 followed by silence.
+    run_network(
+        vec!["*".into()],
+        vec![("forge 101", "res.status = 101")],
+        |proxy| async move {
+            let (mut stream, port) = upgrade_stream(&proxy).await;
+            stream
+                .write_all(websocket_handshake(port, false).as_bytes())
+                .await
+                .unwrap();
+            let resp = read_until_eof(&mut stream).await;
+            assert!(
+                resp.starts_with("HTTP/1.1 502"),
+                "expected 502, got: {resp}"
+            );
+            assert!(
+                resp.to_lowercase().contains("connection: close"),
+                "expected Connection: close, got: {resp}"
+            );
+        },
+    );
 }

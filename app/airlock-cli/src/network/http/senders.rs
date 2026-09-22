@@ -6,7 +6,7 @@ use std::pin::Pin;
 
 use hyper::body::Incoming;
 use hyper::header::{HOST, HeaderValue};
-use hyper::{Request, Response, Uri};
+use hyper::{Method, Request, Response, Uri};
 
 use crate::network::http::ResponseBody;
 
@@ -44,6 +44,10 @@ impl RequestSender for H1Sender {
 /// Requests that arrived over h1 are already in origin form and carry their
 /// own `Host`, so this is a no-op for them.
 fn to_origin_form(req: &mut Request<ResponseBody>) {
+    // `CONNECT host:port` is authority-form by definition.
+    if req.method() == Method::CONNECT {
+        return;
+    }
     let Some(authority) = req.uri().authority().cloned() else {
         return;
     };

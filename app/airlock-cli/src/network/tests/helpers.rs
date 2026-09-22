@@ -10,7 +10,7 @@ use airlock_common::network_capnp::{connect_result, network_proxy, tcp_sink};
 use axum::Router;
 use bytes::{Buf, Bytes};
 use capnp_rpc::{rpc_twoparty_capnp, twoparty};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::LocalSet;
@@ -303,7 +303,7 @@ pub struct TestConnection {
 impl TestConnection {
     pub async fn connect(proxy: &network_proxy::Client, host: &str, port: u16) -> Option<Self> {
         let (tx, container_rx) = mpsc::channel::<Bytes>(16);
-        let client_sink: tcp_sink::Client = capnp_rpc::new_client(CollectorSink(tx));
+        let client_sink: tcp_sink::Client = capnp_rpc::new_client(CollectorSink::new(tx));
 
         let mut req = proxy.connect_request();
         let mut tcp = req.get().init_target().init_tcp();
@@ -418,20 +418,31 @@ impl AsyncWrite for RpcStream {
     }
 }
 
-struct CollectorSink(mpsc::Sender<Bytes>);
+struct CollectorSink(std::cell::RefCell<Option<mpsc::Sender<Bytes>>>);
+
+impl CollectorSink {
+    fn new(tx: mpsc::Sender<Bytes>) -> Self {
+        Self(std::cell::RefCell::new(Some(tx)))
+    }
+}
 
 impl tcp_sink::Server for CollectorSink {
     async fn send(self: Rc<Self>, params: tcp_sink::SendParams) -> Result<(), capnp::Error> {
         let data = params.get()?.get_data()?;
-        let _ = self.0.send(Bytes::copy_from_slice(data)).await;
+        let tx = self.0.borrow().clone();
+        if let Some(tx) = tx {
+            let _ = tx.send(Bytes::copy_from_slice(data)).await;
+        }
         Ok(())
     }
 
+    /// Drop the sender so the container side reads EOF, like a real FIN.
     async fn close(
         self: Rc<Self>,
         _params: tcp_sink::CloseParams,
         _results: tcp_sink::CloseResults,
     ) -> Result<(), capnp::Error> {
+        self.0.borrow_mut().take();
         Ok(())
     }
 }
@@ -451,4 +462,173 @@ pub fn http_post(port: u16, path: &str, body: &str) -> String {
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+// ── HTTP/1.1 Upgrade (WebSocket, CONNECT) ───────────────
+
+/// Speak the upgrade-echo protocol on one accepted stream: answer a
+/// well-formed WebSocket handshake with 101, or a `CONNECT` with 200, plus
+/// an immediate greeting, then echo every byte read back upper-cased.
+/// A `CONNECT` with `X-Reply: 204` gets a bare 204 and the connection is
+/// then held open, idle. Anything else gets a 400.
+///
+/// Raw bytes rather than a WebSocket library so the tests see exactly
+/// which bytes cross the proxy on both sides of the switch.
+pub async fn upgrade_echo<S: AsyncRead + AsyncWrite + Unpin>(mut sock: S) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let body_start = loop {
+        let n = sock.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(p) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break p + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&buf[..body_start]).to_lowercase();
+    let reply: &[u8] = if head.starts_with("connect ") && head.contains("x-reply: 204") {
+        sock.write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+            .await
+            .unwrap();
+        while sock.read(&mut chunk).await.is_ok_and(|n| n > 0) {}
+        return;
+    } else if head.starts_with("connect ") {
+        b"HTTP/1.1 200 Connection Established\r\n\r\nserver-hello"
+    } else if head.contains("upgrade: websocket")
+        && head.contains("connection: upgrade")
+        && head.contains("sec-websocket-key:")
+    {
+        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
+          Connection: Upgrade\r\nSec-WebSocket-Accept: test\r\n\r\nserver-hello"
+    } else {
+        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nnot-upgrade"
+    };
+    sock.write_all(reply).await.unwrap();
+    if reply.starts_with(b"HTTP/1.1 400") {
+        return;
+    }
+    // Bytes the client sent right behind its request count too.
+    let mut pending = buf[body_start..].to_vec();
+    loop {
+        if !pending.is_empty() {
+            sock.write_all(&pending.to_ascii_uppercase()).await.unwrap();
+            pending.clear();
+        }
+        let n = sock.read(&mut chunk).await.unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        pending.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Plain-TCP [`upgrade_echo`] server.
+pub async fn serve_upgrade_echo() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let (sock, _) = listener.accept().await.unwrap();
+            tokio::spawn(upgrade_echo(sock));
+        }
+    });
+    addr
+}
+
+/// Read from `stream` until the collected text contains `needle`.
+/// Panics (showing what did arrive) after two seconds.
+pub async fn read_until_contains<S: AsyncRead + Unpin>(stream: &mut S, needle: &str) -> String {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
+    loop {
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        if text.contains(needle) {
+            return text;
+        }
+        let n = tokio::time::timeout_at(deadline, stream.read(&mut chunk))
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}, got: {text:?}"))
+            .unwrap();
+        assert!(
+            n > 0,
+            "stream closed while waiting for {needle:?}, got: {text:?}"
+        );
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+/// Read from `stream` until EOF. Panics (showing what did arrive) after
+/// two seconds.
+pub async fn read_until_eof<S: AsyncRead + Unpin>(stream: &mut S) -> String {
+    let mut buf = Vec::new();
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        stream.read_to_end(&mut buf),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out waiting for EOF, got: {:?}",
+            String::from_utf8_lossy(&buf)
+        )
+    })
+    .unwrap();
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// A WebSocket handshake for [`upgrade_echo`]. `key` false leaves out
+/// `Sec-WebSocket-Key`, which the server rejects.
+pub fn websocket_handshake(port: u16, key: bool) -> String {
+    let key = if key {
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+    } else {
+        ""
+    };
+    format!(
+        "GET /ws HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\n\
+         Connection: Upgrade\r\n{key}Sec-WebSocket-Version: 13\r\n\r\n"
+    )
+}
+
+/// Send `request` to an [`upgrade_echo`] server through the proxy on
+/// `stream`, expect a reply starting with `status`, then relay raw bytes
+/// both ways. The first client bytes ride in the same write as the
+/// request and the server's greeting rides behind its reply, so both
+/// hyper read buffers are exercised.
+pub async fn assert_raw_relay<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    request: &str,
+    status: &str,
+) {
+    stream
+        .write_all(format!("{request}ping-1").as_bytes())
+        .await
+        .unwrap();
+    let resp = read_until_contains(stream, "PING-1").await;
+    let (head, rest) = resp.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with(status), "expected {status}, got: {head}");
+    let head = head.to_lowercase();
+    if status.contains("101") {
+        assert!(
+            head.contains("upgrade: websocket"),
+            "missing Upgrade: {head}"
+        );
+        assert!(
+            head.contains("connection: upgrade"),
+            "Connection: upgrade must survive the proxy: {head}"
+        );
+    }
+    assert!(
+        !head.contains("connection: close"),
+        "switch must not be rewritten to close: {head}"
+    );
+    assert_eq!(rest, "server-helloPING-1", "bytes behind the switch");
+
+    stream.write_all(b"ping-2").await.unwrap();
+    assert_eq!(read_until_contains(stream, "PING-2").await, "PING-2");
+    stream.write_all(b"ping-3").await.unwrap();
+    assert_eq!(read_until_contains(stream, "PING-3").await, "PING-3");
 }

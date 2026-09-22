@@ -125,7 +125,7 @@ fn spawn_tcp_connection(
         .await;
 
         if let Err(e) = result {
-            debug!("connection {addr} error: {e}");
+            debug!("connection {addr} error: {e:#}");
             *task_error.borrow_mut() = Some(format!("{e}"));
         }
 
@@ -185,7 +185,7 @@ fn spawn_socket_connection(path: &str, client_sink: tcp_sink::Client) -> tcp_sin
         }
         .await;
         if let Err(e) = result {
-            debug!("socket connection {path} error: {e}");
+            debug!("socket connection {path} error: {e:#}");
             *task_error.borrow_mut() = Some(format!("{e}"));
         }
     });
@@ -279,6 +279,9 @@ async fn handle_connection(
 async fn detect_http(mut container: io::Transport) -> (io::Transport, bool) {
     match http::detect(&mut container.read).await {
         Ok(prefix) => {
+            // What the guest actually speaks decides the server-side hyper
+            // flavour (an h2 ALPN pick without the preface is still h1).
+            container.h2 = http::is_h2_preface(&prefix);
             container.read = Box::new(io::PrefixedRead::new(prefix, container.read));
             (container, true)
         }
