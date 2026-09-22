@@ -35,7 +35,7 @@ pub struct Config {
     /// Environment variables injected into the container.
     /// Values support `${VAR}` substitution from the host environment.
     /// An entry may be a plain string or `{ value = "...", mask = true }`;
-    /// masked entries reach the guest as a random surrogate of the same
+    /// masked entries reach the guest as a stable surrogate of the same
     /// length (see [`config::EnvVar`]).
     #[config(default)]
     pub env: BTreeMap<String, config::EnvVar>,
@@ -245,8 +245,9 @@ pub mod config {
     /// String form:  `TOKEN = "${TOKEN}"`
     /// Object form:  `TOKEN = { value = "${TOKEN}", mask = true }`
     ///
-    /// With `mask = true` the guest sees a random alphanumeric surrogate of
-    /// the same length instead of the real value. The real value can still
+    /// With `mask = true` the guest sees a stable alphanumeric surrogate of
+    /// the same length (derived from the variable name and the length, never
+    /// from the value) instead of the real value. The real value can still
     /// be substituted into outbound HTTP headers on the host through a
     /// network rule's `inject` list.
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

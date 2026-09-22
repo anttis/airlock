@@ -9,7 +9,7 @@ the `claude` CLI and add the preset to your config.
 ## What the preset does
 
 The real OAuth token stays on the host. The VM sees a same-length
-random surrogate, and airlock inserts the real token at the host
+surrogate, and airlock inserts the real token at the host
 boundary.
 
 - **Your token stays on the host.** `CLAUDE_CODE_OAUTH_TOKEN` is

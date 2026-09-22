@@ -3,7 +3,7 @@
 The `openai-codex` preset bundles the sandbox setup for the
 [OpenAI Codex CLI](https://github.com/openai/codex). It keeps your
 OpenAI API key on the host and lets the sandbox run against a
-same-length random surrogate — Codex talks to OpenAI normally, but
+same-length surrogate — Codex talks to OpenAI normally, but
 it never sees the real credential.
 
 ## What the preset does
@@ -15,7 +15,9 @@ bearer token on every request. The preset
 the real key into request headers to the OpenAI hosts.
 
 - **Your API key stays on the host.** Inside the VM,
-  `OPENAI_API_KEY` is a random string of the same length.
+  `OPENAI_API_KEY` is a surrogate string of the same length. The
+  surrogate is [stable](../configuration/env.md#masking), so the copy
+  that Codex writes to its auth file on first run stays valid.
 - **Only OpenAI endpoints are reachable** (`api.openai.com` and
   `auth.openai.com`). Everything else stays blocked by your
   deny-by-default policy.

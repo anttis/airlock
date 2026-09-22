@@ -2,15 +2,22 @@
 //!
 //! Every value template is substituted once through the project vault
 //! (host env first, secret vault as fallback). Entries marked `mask = true`
-//! additionally get a **surrogate**: a random alphanumeric string with the
-//! same character count as the real value. The guest only ever receives the
+//! additionally get a **surrogate**: an ASCII alphanumeric string with the
+//! same byte length as the real value. The guest only ever receives the
 //! surrogate; the real value stays on the host, where the network proxy can
 //! swap it back into outbound HTTP headers for rules that `inject` it.
+//!
+//! Surrogates are stable: derived from the variable name and the value's
+//! byte length, never from the value. Tools that persist the
+//! credential on first run (Codex) keep working across restarts and
+//! secret rotation.
 
 use std::collections::BTreeMap;
 use std::fmt;
 
-use rand::distr::{Alphanumeric, SampleString};
+use rand::rngs::ChaCha20Rng;
+use rand::{Rng, SeedableRng};
+use sha2::{Digest, Sha256};
 
 use crate::config::config::EnvVar;
 use crate::vault::Vault;
@@ -55,7 +62,7 @@ impl fmt::Debug for MaskedSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MaskedSecret")
             .field("name", &self.name)
-            .field("len", &self.real.chars().count())
+            .field("len", &self.real.len())
             .finish_non_exhaustive()
     }
 }
@@ -83,7 +90,7 @@ impl SandboxEnv {
                 .subst(&entry.value)
                 .map_err(|e| EnvError::new(key, e))?;
             if entry.mask {
-                let surrogate = surrogate_for(&real);
+                let surrogate = surrogate_for(key, &real);
                 guest.push((key.clone(), surrogate.clone()));
                 masked.insert(
                     key.clone(),
@@ -151,10 +158,10 @@ impl SandboxEnv {
                 "must be defined in [env] with mask = true to be injected",
             ));
         };
-        if secret.real.chars().count() < MIN_INJECT_LEN {
+        if secret.real.len() < MIN_INJECT_LEN {
             return Err(EnvError::new(
                 name,
-                format!("injected value is shorter than {MIN_INJECT_LEN} characters"),
+                format!("injected value is shorter than {MIN_INJECT_LEN} bytes"),
             ));
         }
         if hyper::header::HeaderValue::from_str(&secret.real).is_err() {
@@ -180,13 +187,31 @@ impl SandboxEnv {
     }
 }
 
-/// A random `[A-Za-z0-9]` string with the same character count as `value`.
-/// Same *character* count, not byte count: header rewriting works on bytes,
-/// but the guest-facing contract ("looks like the real thing") is about
-/// what a program sees, and non-ASCII secrets are rare enough that the byte
-/// length mismatch is irrelevant.
-fn surrogate_for(value: &str) -> String {
-    Alphanumeric.sample_string(&mut rand::rng(), value.chars().count())
+/// Domain separator. Bump the version if the derivation changes; cached
+/// surrogates become invalid.
+const SURROGATE_DOMAIN: &[u8] = b"airlock-surrogate-v1";
+
+/// The surrogate alphabet, 62 symbols.
+const SURROGATE_ALPHABET: &[u8; 62] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+/// A deterministic `[A-Za-z0-9]` string with the same byte length as
+/// `value`, derived from `name` and that length only. The value itself
+/// never enters the hash, so the surrogate reveals nothing but the length.
+///
+/// ChaCha20 seeded with a SHA-256 of the inputs. Its stream is stable
+/// across crate versions, unlike `StdRng`.
+fn surrogate_for(name: &str, value: &str) -> String {
+    let len = value.len();
+    let mut hasher = Sha256::new();
+    hasher.update(SURROGATE_DOMAIN);
+    hasher.update((name.len() as u64).to_le_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update((len as u64).to_le_bytes());
+    let mut rng = ChaCha20Rng::from_seed(hasher.finalize().into());
+    (0..len)
+        .map(|_| SURROGATE_ALPHABET[(rng.next_u32() % 62) as usize] as char)
+        .collect()
 }
 
 #[cfg(test)]
@@ -223,24 +248,75 @@ mod tests {
     }
 
     #[test]
-    fn surrogate_has_same_char_count_and_is_alphanumeric() {
+    fn surrogate_has_same_byte_length_and_is_alphanumeric() {
         for real in ["sk-ant-oat01-abcdefghijklmnop", "x", "ääkkönen-token"] {
-            let s = surrogate_for(real);
-            assert_eq!(s.chars().count(), real.chars().count(), "for {real}");
+            let s = surrogate_for("TOKEN", real);
+            assert_eq!(s.len(), real.len(), "for {real}");
             assert!(s.chars().all(|c| c.is_ascii_alphanumeric()), "got {s}");
         }
     }
 
     #[test]
     fn surrogate_of_empty_is_empty() {
-        assert_eq!(surrogate_for(""), "");
+        assert_eq!(surrogate_for("TOKEN", ""), "");
     }
 
     #[test]
     fn surrogate_differs_from_real_value() {
         let real = "sk-ant-oat01-abcdefghijklmnop";
         // The alphabet excludes `-`, so a collision is impossible here.
-        assert_ne!(surrogate_for(real), real);
+        assert_ne!(surrogate_for("TOKEN", real), real);
+    }
+
+    #[test]
+    fn surrogate_depends_only_on_name_and_length() {
+        // Same name and length, different value: same surrogate.
+        let a = surrogate_for("OPENAI_API_KEY", "sk-aaaaaaaaaaaaaaaaaaaa");
+        let b = surrogate_for("OPENAI_API_KEY", "sk-bbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(a, b);
+        // Different name or different length: different surrogate.
+        assert_ne!(
+            a,
+            surrogate_for("OPENAI_API_KEX", "sk-aaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_ne!(a, surrogate_for("OPENAI_API_KEY", "sk-aaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn surrogate_name_and_length_do_not_alias() {
+        // Name is length-prefixed, so name/length boundaries cannot shift.
+        assert_ne!(surrogate_for("TOKEN1", "ab"), surrogate_for("TOKEN", "ab"));
+        assert_ne!(
+            surrogate_for("TOKEN1", "abcdefghij"),
+            surrogate_for("TOKEN", "abcdefghij")
+        );
+    }
+
+    #[test]
+    fn surrogate_is_pinned() {
+        // Golden values. A change here invalidates every cached surrogate:
+        // bump `SURROGATE_DOMAIN` or revert.
+        assert_eq!(
+            surrogate_for(
+                "OPENAI_API_KEY",
+                "sk-proj-0123456789abcdefghijklmnopqrstuvwxyz0123"
+            ),
+            "gHPoAQXAEPp1xt0XCGvsexx4AicTJokPIS7jw7D8AvRuM4BL"
+        );
+        assert_eq!(
+            surrogate_for(
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "sk-ant-oat01-0123456789abcdefghijklmnopqrstuvwxyz"
+            ),
+            "4YIqU4HuWttkzVxUuWLXos9ycGwcCfUKlxnsofMlyjpKd4LBC"
+        );
+        // Spans more than one ChaCha block.
+        let long = surrogate_for("LONG", &"x".repeat(100));
+        assert_eq!(long.len(), 100);
+        assert_eq!(
+            long,
+            "csNmqNAJNbzpxubyNC7TSRONA5TTH97VhNl5WxXvbhDp23aR20Rwj0LDNCapy0BUKUbTb677RnbzvWeHfazQcvQ57sh8sOX1FBBX"
+        );
     }
 
     #[test]
@@ -319,17 +395,17 @@ mod tests {
     }
 
     #[test]
-    fn non_ascii_value_masks_by_char_count_and_is_injectable() {
-        // A 4-byte emoji counts as one character: the surrogate has the
-        // same number of characters, fewer bytes. Non-ASCII bytes are
-        // still legal header bytes, so the value stays injectable.
+    fn non_ascii_value_masks_by_byte_length_and_is_injectable() {
+        // The surrogate matches the byte length, so it has more characters
+        // than the real value. Non-ASCII bytes are legal header bytes, so
+        // the value stays injectable.
         let real = "🔑-secret-token";
         let v = vault(&[]);
         let e = env(&[("TOKEN", real, true)]);
         let resolved = SandboxEnv::resolve(&e, &v).unwrap();
         let secret = resolved.masked("TOKEN").unwrap();
-        assert_eq!(secret.surrogate.chars().count(), real.chars().count());
-        assert!(secret.surrogate.len() < real.len());
+        assert_eq!(secret.surrogate.len(), real.len());
+        assert!(secret.surrogate.chars().count() > real.chars().count());
         assert!(secret.surrogate.is_ascii());
         resolved.check_injectable("TOKEN").unwrap();
     }

@@ -55,11 +55,13 @@ Set `mask = true` to keep a secret out of the sandbox:
 API_TOKEN = { value = "${MY_API_TOKEN}", mask = true }
 ```
 
-Inside the sandbox the variable holds a **surrogate**: a random
-alphanumeric string with the same number of characters, regenerated on
-every start. The real value stays on the host. To use the secret, list it
-in a network rule's [`inject`](network.md#injecting-masked-secrets), which
-swaps the surrogate for the real value in HTTP request headers.
+Inside the sandbox the variable holds a **surrogate**: an ASCII
+alphanumeric string with the same number of bytes. airlock derives it
+from the variable name and the length, never from the value, so it stays
+the same on every start. The real value stays on the host. To use the
+secret, list it in a network rule's
+[`inject`](network.md#injecting-masked-secrets), which swaps the surrogate
+for the real value in HTTP request headers.
 
 - The table form accepts only `value` and `mask` — any other key is an error.
 - airlock substitutes `value` first (`${VAR}` works as usual), then masks it.

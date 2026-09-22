@@ -7,7 +7,7 @@ access to the GitHub endpoints Copilot actually uses.
 
 ## What the preset does
 
-The sandbox sees a same-length random surrogate in
+The sandbox sees a same-length surrogate in
 `COPILOT_GITHUB_TOKEN`, and airlock inserts the real token at the
 host boundary.
 
