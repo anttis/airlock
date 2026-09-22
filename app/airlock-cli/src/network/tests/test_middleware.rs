@@ -136,6 +136,33 @@ fn inject_request_header() {
 }
 
 #[test]
+fn set_basic_auth_header() {
+    with_middleware(
+        vec![("auth", r#"req:setBasicAuth("alice", "s3cr:t")"#)],
+        |proxy| async move {
+            let addr = serve(Router::new().route(
+                "/",
+                get(|headers: axum::http::HeaderMap| async move {
+                    headers
+                        .get("authorization")
+                        .map_or("missing".into(), |v| v.to_str().unwrap().to_string())
+                }),
+            ))
+            .await;
+            let mut conn = TestConnection::connect(&proxy, "127.0.0.1", addr.port())
+                .await
+                .unwrap();
+            let resp = conn.roundtrip(&http_get(addr.port(), "/")).await;
+            // base64("alice:s3cr:t")
+            assert!(
+                resp.contains("Basic YWxpY2U6czNjcjp0"),
+                "expected basic auth header: {resp}"
+            );
+        },
+    );
+}
+
+#[test]
 fn read_request_body() {
     with_middleware_log(
         vec![(

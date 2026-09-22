@@ -316,6 +316,25 @@ impl UserData for State {
                 Ok(())
             })
         });
+        methods.add_method(
+            "setBasicAuth",
+            |_, this, (user, password): (String, String)| {
+                use base64::Engine;
+                if user.contains(':') {
+                    return Err(mlua::Error::runtime(
+                        "basic auth user name must not contain ':'",
+                    ));
+                }
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"));
+                this.with_req_mut(|p, _| {
+                    let val = hyper::header::HeaderValue::from_str(&format!("Basic {encoded}"))
+                        .map_err(|e| mlua::Error::runtime(format!("invalid header value: {e}")))?;
+                    p.headers.insert(hyper::header::AUTHORIZATION, val);
+                    Ok(())
+                })
+            },
+        );
         methods.add_method("hostMatches", |_, this, pattern: String| {
             // Match against the authenticated connect target, not the
             // spoofable request URI / Host header.

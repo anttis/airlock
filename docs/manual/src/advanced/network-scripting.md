@@ -63,20 +63,21 @@ unmodified.
 
 The `req` object is available in every middleware script:
 
-| Field / Method               | Description                                                                           |
-|------------------------------|---------------------------------------------------------------------------------------|
-| `req.method`                 | HTTP method (`"GET"`, `"POST"`, etc.)                                                 |
-| `req.path`                   | URL path (readable and writable)                                                      |
-| `req.host`                   | Authenticated destination host (the connect target, not the `Host` header)            |
-| `req.headers`                | Full headers table (readable and writable)                                            |
-| `req:header(name)`           | Read a single header value (use `req:header("host")` for the raw, client-sent `Host`) |
-| `req:setHeader(name, value)` | Set or overwrite a header                                                             |
-| `req:hostMatches(pattern)`   | Match the connect target against a wildcard pattern                                   |
-| `req:body()`                 | Read the request body (returns a Body object)                                         |
-| `req:setBody(value)`         | Replace the body (string, table, Body, or nil)                                        |
-| `req:deny()`                 | Block the request with a 403 response                                                 |
-| `req:send()`                 | Forward the request and return the response                                           |
-| `log(msg)`                   | Write to the supervisor debug log                                                     |
+| Field / Method                     | Description                                                                           |
+|------------------------------------|---------------------------------------------------------------------------------------|
+| `req.method`                       | HTTP method (`"GET"`, `"POST"`, etc.)                                                 |
+| `req.path`                         | URL path (readable and writable)                                                      |
+| `req.host`                         | Authenticated destination host (the connect target, not the `Host` header)            |
+| `req.headers`                      | Full headers table (readable and writable)                                            |
+| `req:header(name)`                 | Read a single header value (use `req:header("host")` for the raw, client-sent `Host`) |
+| `req:setHeader(name, value)`       | Set or overwrite a header                                                             |
+| `req:setBasicAuth(user, password)` | Set the `Authorization` header to HTTP Basic credentials.                             |
+| `req:hostMatches(pattern)`         | Match the connect target against a wildcard pattern                                   |
+| `req:body()`                       | Read the request body (returns a Body object)                                         |
+| `req:setBody(value)`               | Replace the body (string, table, Body, or nil)                                        |
+| `req:deny()`                       | Block the request with a 403 response                                                 |
+| `req:send()`                       | Forward the request and return the response                                           |
+| `log(msg)`                         | Write to the supervisor debug log                                                     |
 
 ### Blocking a request
 
