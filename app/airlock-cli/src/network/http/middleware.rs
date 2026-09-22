@@ -86,7 +86,10 @@ pub fn compile(
     Ok(CompiledMiddleware(Rc::new(Inner { lua, func })))
 }
 
-#[derive(Debug, thiserror::Error)]
+/// Raised by `req:deny()`. Also tags, as a response extension, the 403 that
+/// [`run`] answers a denial with, so the caller can tell it apart from an
+/// upstream 403.
+#[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("denied by network rules")]
 pub struct Denied;
 
@@ -102,9 +105,9 @@ fn is_denied(e: &mlua::Error) -> bool {
 /// Run all HTTP middleware layers around the send function.
 ///
 /// Default behaviour is to forward the request. Scripts can call
-/// `req:deny()` to block with 403. If a script neither calls
-/// `req:send()`/`req:allow()` nor `req:deny()`, the request is forwarded
-/// implicitly (allow-by-default).
+/// `req:deny()` to block with 403, tagged with the [`Denied`] extension.
+/// If a script calls neither `req:send()` nor `req:deny()`, the request is
+/// forwarded implicitly (allow-by-default).
 ///
 /// Empty middleware list forwards directly.
 pub async fn run<F, Fut>(
@@ -198,6 +201,7 @@ where
             deny_reporter.report();
             Ok(hyper::Response::builder()
                 .status(403)
+                .extension(Denied)
                 .body(Either::Right(Full::new(Bytes::from(
                     "Denied by network rules\n",
                 ))))

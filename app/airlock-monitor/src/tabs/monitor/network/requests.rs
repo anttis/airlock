@@ -48,10 +48,14 @@ impl RequestEntry {
         }
     }
 
-    /// Attach the response half once it arrives.
+    /// Attach the response half once it arrives. A middleware denial
+    /// overturns the allowed verdict the request arrived with.
     pub fn apply_response(&mut self, info: &crate::ResponseInfo) {
         self.status = Some(info.status);
         self.response_headers.clone_from(&info.headers);
+        if info.denied {
+            self.allowed = false;
+        }
     }
 }
 

@@ -110,6 +110,12 @@ pub struct ResponseInfo {
     pub id: u64,
     pub status: u16,
     pub headers: Vec<(String, String)>,
+    /// A middleware script denied the request (`req:deny()`), and this is
+    /// the proxy's 403 rather than an upstream reply. Middleware runs after
+    /// the [`RequestInfo`] goes out, so that event said `allowed`; this
+    /// overturns it. Always `false` for a request the policy denied: its
+    /// `RequestInfo` already said so.
+    pub denied: bool,
 }
 
 /// Events sent to the TUI thread.

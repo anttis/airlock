@@ -12,7 +12,7 @@ use bytes::{Buf, Bytes};
 use capnp_rpc::{rpc_twoparty_capnp, twoparty};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::LocalSet;
 
 use crate::config::config::{self, MiddlewareRule, NetworkRule, Policy};
@@ -137,16 +137,35 @@ where
     F: FnOnce(network_proxy::Client, RequestLog, String /* mitm_ca_pem */) -> Fut,
     Fut: Future<Output = ()>,
 {
+    block_on_local(async move {
+        let (log, mitm_ca_pem, network) = build_network(cfg);
+        let proxy = start_rpc(network);
+        f(proxy, log, mitm_ca_pem).await;
+    });
+}
+
+/// Test runner that also subscribes to the monitor event stream, before
+/// the proxy starts so no event is missed.
+pub fn run_with_events<F, Fut>(cfg: TestNetworkConfig, f: F)
+where
+    F: FnOnce(network_proxy::Client, broadcast::Receiver<airlock_monitor::NetworkEvent>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    block_on_local(async move {
+        let (_log, _mitm_ca_pem, network) = build_network(cfg);
+        let events = network.events();
+        let proxy = start_rpc(network);
+        f(proxy, events).await;
+    });
+}
+
+fn block_on_local(fut: impl Future<Output = ()>) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     let local = LocalSet::new();
-    rt.block_on(local.run_until(async move {
-        let (log, mitm_ca_pem, network) = build_network(cfg);
-        let proxy = start_rpc(network);
-        f(proxy, log, mitm_ca_pem).await;
-    }));
+    rt.block_on(local.run_until(fut));
 }
 
 pub fn build_network(cfg: TestNetworkConfig) -> (RequestLog, String, Network) {
@@ -254,7 +273,9 @@ pub fn build_network(cfg: TestNetworkConfig) -> (RequestLog, String, Network) {
             inject_targets,
             port_forwards: std::collections::HashMap::default(),
             socket_map: std::collections::HashMap::default(),
-            events: tokio::sync::broadcast::channel(1).0,
+            // Room for every event a `run_with_events` test reads after
+            // the fact. Without a subscriber nothing is sent at all.
+            events: tokio::sync::broadcast::channel(64).0,
             next_id: std::sync::atomic::AtomicU64::new(0),
             deny_reporter: crate::network::DenyReporter::new(),
         },

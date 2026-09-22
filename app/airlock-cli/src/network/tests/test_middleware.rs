@@ -50,6 +50,78 @@ fn deny_by_path() {
     );
 }
 
+/// The monitor lists a request before middleware runs, so a `req:deny()`
+/// has to reach it on the response event — also one that comes after
+/// `req:send()`. An upstream 403 and a policy deny must not carry the
+/// flag: the first is no denial, the second was already reported denied
+/// on the request event.
+#[test]
+fn deny_is_reported_on_response_event() {
+    run_with_events(
+        TestNetworkConfig {
+            allowed_hosts: vec!["127.0.0.1".into()],
+            middleware_scripts: vec![(
+                "deny /denied and /late",
+                r#"
+                if req.path == "/denied" then req:deny() end
+                if req.path == "/late" then
+                    req:send()
+                    req:deny()
+                end
+                "#,
+            )],
+            ..Default::default()
+        },
+        |proxy, mut events| async move {
+            let addr = serve(
+                Router::new()
+                    .route("/allowed", get(|| async { "ok" }))
+                    .route("/denied", get(|| async { "secret" }))
+                    .route("/late", get(|| async { "secret" }))
+                    .route(
+                        "/forbidden",
+                        get(|| async { (axum::http::StatusCode::FORBIDDEN, "no") }),
+                    ),
+            )
+            .await;
+
+            for (host, path) in [
+                ("127.0.0.1", "/allowed"),
+                ("127.0.0.1", "/denied"),
+                ("127.0.0.1", "/late"),
+                ("127.0.0.1", "/forbidden"),
+                ("blocked.example", "/policy"),
+            ] {
+                let mut conn = TestConnection::connect(&proxy, host, addr.port())
+                    .await
+                    .unwrap();
+                conn.roundtrip(&http_get(addr.port(), path)).await;
+            }
+
+            // path → (request allowed, response status, response denied)
+            let mut seen = std::collections::HashMap::new();
+            let mut paths = std::collections::HashMap::new();
+            while let Ok(ev) = events.try_recv() {
+                match ev {
+                    airlock_monitor::NetworkEvent::Request(r) => {
+                        paths.insert(r.id, (r.path.clone(), r.allowed));
+                    }
+                    airlock_monitor::NetworkEvent::Response(r) => {
+                        let (path, allowed) = paths[&r.id].clone();
+                        seen.insert(path, (allowed, r.status, r.denied));
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(seen["/allowed"], (true, 200, false));
+            assert_eq!(seen["/denied"], (true, 403, true));
+            assert_eq!(seen["/late"], (true, 403, true));
+            assert_eq!(seen["/forbidden"], (true, 403, false));
+            assert_eq!(seen["/policy"], (false, 403, false));
+        },
+    );
+}
+
 #[test]
 fn spoofed_host_header_does_not_trigger_host_rule() {
     with_middleware(

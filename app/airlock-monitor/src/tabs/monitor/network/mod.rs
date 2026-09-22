@@ -48,8 +48,10 @@ pub struct NetworkTab {
     pub sub_tab: NetworkSubTab,
     pub connections: Vec<ConnectionEntry>,
     pub requests: Vec<RequestEntry>,
-    /// Lifetime counters, incremented on every event. Kept separate from
-    /// the per-list vecs so they persist past the 100-entry buffer cap.
+    /// Lifetime counters, bumped on each `Connect` / `Request` event. A
+    /// middleware-denied `Response` moves one request from allowed to
+    /// denied. Kept separate from the per-list vecs so they persist past
+    /// the buffer cap.
     pub connection_allowed: u32,
     pub connection_denied: u32,
     pub request_allowed: u32,
@@ -232,6 +234,13 @@ impl NetworkTab {
                 );
             }
             NetworkEvent::Response(info) => {
+                // A middleware denial overturns a request already counted
+                // as allowed. Move that count here, not in the row update:
+                // the cap may already have evicted the row.
+                if info.denied {
+                    self.request_allowed = self.request_allowed.saturating_sub(1);
+                    self.request_denied += 1;
+                }
                 if let Some(entry) = self.requests.iter_mut().find(|r| r.id == info.id) {
                     entry.apply_response(&info);
                 }
@@ -793,6 +802,7 @@ mod tests {
                 id: 8,
                 status: 404,
                 headers: vec![("server".into(), "nginx".into())],
+                denied: false,
             })),
             &settings(),
         );
@@ -817,12 +827,71 @@ mod tests {
                 id: 1,
                 status: 200,
                 headers: vec![],
+                denied: false,
             })),
             &settings(),
         );
 
         match tab.details.as_ref().unwrap() {
             DetailView::Request(r) => assert_eq!(r.status, Some(200)),
+            DetailView::Connection(_) => panic!("expected a request detail view"),
+        }
+    }
+
+    fn response(id: u64, status: u16, denied: bool) -> NetworkEvent {
+        NetworkEvent::Response(Arc::new(ResponseInfo {
+            id,
+            status,
+            headers: vec![],
+            denied,
+        }))
+    }
+
+    /// A middleware `req:deny()` arrives on the response, after the request
+    /// was listed and counted as allowed. An upstream 403 is not a denial.
+    #[test]
+    fn middleware_deny_overturns_allowed_request() {
+        let mut tab = NetworkTab::new();
+        tab.push_event(request(1), &settings());
+        tab.push_event(request(2), &settings());
+        assert_eq!((tab.request_allowed, tab.request_denied), (2, 0));
+
+        tab.push_event(response(1, 403, false), &settings());
+        tab.push_event(response(2, 403, true), &settings());
+
+        let by_id = |id: u64| tab.requests.iter().find(|r| r.id == id).unwrap();
+        assert!(by_id(1).allowed);
+        assert!(!by_id(2).allowed);
+        assert_eq!((tab.request_allowed, tab.request_denied), (1, 1));
+    }
+
+    /// The counters are running totals, so a denial for a row the cap
+    /// already evicted still moves its count.
+    #[test]
+    fn middleware_deny_after_eviction_moves_count() {
+        let mut settings = settings();
+        settings.max_http_requests = 1;
+        let mut tab = NetworkTab::new();
+        tab.push_event(request(1), &settings);
+        tab.push_event(request(2), &settings);
+        assert_eq!(tab.requests.len(), 1);
+
+        tab.push_event(response(1, 403, true), &settings);
+
+        assert!(tab.requests[0].allowed);
+        assert_eq!((tab.request_allowed, tab.request_denied), (1, 1));
+    }
+
+    #[test]
+    fn middleware_deny_updates_open_details_snapshot() {
+        let mut tab = NetworkTab::new();
+        tab.push_event(request(1), &settings());
+        tab.open_details();
+
+        tab.push_event(response(1, 403, true), &settings());
+
+        match tab.details.as_ref().unwrap() {
+            DetailView::Request(r) => assert!(!r.allowed),
             DetailView::Connection(_) => panic!("expected a request detail view"),
         }
     }

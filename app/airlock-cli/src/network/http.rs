@@ -374,6 +374,11 @@ fn emit_request_event(
 /// Broadcast the response paired to a prior [`emit_request_event`]. A
 /// `None` id means the request was never reported (no subscribers), so
 /// there's nothing to pair with.
+///
+/// Middleware runs after the request event went out, and only for requests
+/// that event reported allowed. A 403 tagged [`middleware::Denied`] is a
+/// script's `req:deny()`: the response event sets `denied` to overturn the
+/// request event's verdict.
 fn emit_response_event<B>(
     events: &tokio::sync::broadcast::Sender<airlock_monitor::NetworkEvent>,
     id: Option<u64>,
@@ -399,6 +404,7 @@ fn emit_response_event<B>(
         id,
         status: resp.status().as_u16(),
         headers,
+        denied: resp.extensions().get::<middleware::Denied>().is_some(),
     };
     let _ = events.send(airlock_monitor::NetworkEvent::Response(
         std::sync::Arc::new(info),
