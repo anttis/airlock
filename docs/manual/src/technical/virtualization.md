@@ -11,6 +11,9 @@ com.apple.security.virtualization
 com.apple.security.hypervisor
 ```
 
+On supported Macs, you can enable nested virtualization to run VMs inside the sandbox.
+See [Nested KVM](../configuration/vm.md#nested-kvm) for requirements and configuration.
+
 ## Linux: Cloud Hypervisor + KVM
 
 airlock uses [Cloud Hypervisor](https://www.cloudhypervisor.org/) with

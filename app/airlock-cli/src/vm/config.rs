@@ -28,7 +28,6 @@ pub struct VmConfig {
     /// Path to virtiofsd binary (Linux only).
     #[cfg(target_os = "linux")]
     pub virtiofsd: PathBuf,
-    /// Enable KVM nested virtualization (Linux only).
-    #[cfg(target_os = "linux")]
+    /// Enable nested virtualization and expose KVM in the guest.
     pub kvm: bool,
 }

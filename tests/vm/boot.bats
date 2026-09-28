@@ -53,3 +53,8 @@ setup() {
     assert_success
     assert_output_contains "Alpine"
 }
+
+@test "KVM device is hidden by default" {
+    run_vm sh -c 'test ! -e /dev/kvm'
+    assert_success
+}
