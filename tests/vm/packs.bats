@@ -19,14 +19,33 @@ git = { version = 1 }
 mise = { version = 1 }'
 
 # Version commands of all packs, to run in the sandbox. The agent packs
-# also write their airlock MCP and hook files.
+# also write their airlock MCP and hook files. Version 3 of the agent
+# packs connects the MCP server through the stdio adapter.
 VERSIONS='claude --version && codex --version && copilot --version && node --version &&
 test -s /etc/claude-code/managed-settings.d/50-airlock.json &&
+grep -q /run/airlock/bin/airlock-mcp "$HOME/.claude.json" &&
 grep -q /run/airlock/bin/airlock-mcp /etc/codex/config.toml && test -s /etc/codex/hooks.json &&
 test -s /etc/github-copilot/policy.d/50-airlock.json &&
-test -s /usr/local/share/airlock/copilot-mcp.json &&
+grep -q /run/airlock/bin/airlock-mcp /usr/local/share/airlock/copilot-mcp.json &&
 npm --version && python3 --version && cargo --version && rustc --version &&
 docker --version && git --version && mise version && echo ALL-PACKS-OK'
+
+# Version 2 of the agent packs. They stay available for one release, with
+# the MCP server on the HTTP endpoint.
+AGENTS_V2='[packs]
+claude = { version = 2 }
+codex = { version = 2 }
+copilot = { version = 2 }'
+
+# Checks of the version 2 agent packs, to run in the sandbox: the agents
+# start, and their MCP entries use the HTTP endpoint, not the adapter.
+VERSIONS_V2='claude --version && codex --version && copilot --version &&
+grep -q admin.airlock/mcp "$HOME/.claude.json" &&
+grep -q admin.airlock/mcp /etc/codex/config.toml &&
+grep -q admin.airlock/mcp /usr/local/share/airlock/copilot-mcp.json &&
+! grep -q airlock-mcp "$HOME/.claude.json" /etc/codex/config.toml \
+    /usr/local/share/airlock/copilot-mcp.json &&
+echo AGENTS-V2-OK'
 
 setup_file() {
     vm_setup_file
@@ -34,6 +53,9 @@ setup_file() {
     mkdir -p alpine debian
     printf '[vm]\nimage = "alpine:latest"\n\n%s\n' "$PACKS" >alpine/airlock.toml
     printf '[vm]\nimage = "debian:stable-slim"\n\n%s\n' "$PACKS" >debian/airlock.toml
+
+    mkdir -p agents-v2
+    printf '[vm]\nimage = "alpine:latest"\n\n%s\n' "$AGENTS_V2" >agents-v2/airlock.toml
 
     mkdir -p legacy-list
     printf 'presets = ["python"]\n\n[vm]\nimage = "alpine:latest"\n' >legacy-list/airlock.toml
@@ -167,6 +189,19 @@ check_legacy_installs_nothing() {
     check_second_start
     check_rerun
     check_removed_pack
+}
+
+# Test that version 2 of the agent packs still installs and keeps the MCP
+# server on the HTTP endpoint. Sandboxes with these versions must work
+# for the release in which the HTTP command tool is deprecated.
+#   1. Run start with the version 2 agent packs on Alpine
+#   2. Check that the agents start and that their MCP entries use the HTTP
+#      endpoint and not the adapter
+@test "alpine: version 2 agent packs install with http mcp endpoint" {
+    cd agents-v2
+    run_airlock start -- sh -c "$VERSIONS_V2"
+    assert_success
+    assert_output_contains "AGENTS-V2-OK"
 }
 
 # Test that a list-form preset installs no pack.

@@ -1,9 +1,8 @@
 //! Stdio adapter of the `airlock` MCP server.
 //!
 //! An agent starts this mode of the binary as a stdio MCP server. The
-//! adapter relays the bytes of its stdin to the local MCP socket, and the
-//! bytes of the socket to its stdout, with no change. Both sides use
-//! newline-delimited JSON-RPC messages.
+//! adapter connects the agent to the local MCP socket of the server, with
+//! no change to the messages.
 //!
 //! The adapter has no privileges. It runs as the user of the agent, and the
 //! server gets that user from the kernel. If the socket is not available,
@@ -78,7 +77,9 @@ fn run_with(
     }
 }
 
-/// Relay the bytes in both directions.
+/// Relay the bytes in both directions: `input` to the socket, and the
+/// socket to `output`, with no change. Both sides carry newline-delimited
+/// JSON-RPC messages, the same framing as the MCP stdio transport.
 ///
 /// At the end of `input`, only the write side of the socket closes. The
 /// server then sends the replies of the open requests and closes the

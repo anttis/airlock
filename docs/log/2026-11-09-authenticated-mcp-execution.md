@@ -31,7 +31,10 @@ agent:
   This can take up to 5 s, because rmcp first waits for pending replies.
 * `admin/caller.rs`: `Caller::Verified(PeerId)` for socket clients and
   `Caller::BootUnverified` for HTTP. Reads name and home from the
-  container `/etc/passwd` (size limit, no link, no FIFO). These values are
+  container `/etc/passwd` (size limit, no FIFO). It opens `etc` and then
+  `passwd` relative to the open directory, with no link at either name, so
+  a link that the guest adds after a check cannot redirect the read. These
+  values are
   only for display and the environment. They never select the user.
 * `admin/mcp/bridge.rs`: selects uid and gid from the caller. For another
   user than the sandbox user, it sets `HOME` (or `/`), and `USER` and
@@ -66,4 +69,6 @@ as any user. The HTTP endpoint still has no per-process access control.
 * `tests/vm/admin_mcp.bats`: the adapter for root and for an
   unprivileged user, owners and modes of the socket and the adapter, and
   the deprecated `execute` on HTTP. `packs.bats` installs the `@3` packs
-  and checks the adapter entry of Codex.
+  and checks the adapter entries of Claude Code, Codex and Copilot. A
+  separate `packs.bats` test installs the `@2` agent packs and checks that
+  their entries keep the HTTP endpoint.

@@ -181,6 +181,11 @@ user, the supervisor changes some values of the sandbox environment:
 - `USER` and `LOGNAME` get the user name from `/etc/passwd`, but only if
   the sandbox environment has these keys.
 
+The supervisor does not follow a symbolic link at `/etc` or at
+`/etc/passwd` of the container. If one of them is a link, the supervisor
+uses no account data: `HOME` is `/`, `USER` and `LOGNAME` do not change,
+and the approval prompt shows only the user ID.
+
 A `HOME` in the `env` argument of `execute` overrides the value above.
 
 The supervisor enters the working directory after it changes the user.

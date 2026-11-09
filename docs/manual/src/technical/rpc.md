@@ -100,7 +100,20 @@ current. A short orientation:
 - **`NetworkProxy`** — the network channel's bootstrap capability.
   The guest calls it once per outbound TCP connection or Unix socket,
   and the host bridges bytes to the real destination. See
-  [Networking](./networking.md).
+  [Networking](./networking.md). The `airlock` MCP server also uses it to
+  ask the host for a temporary network grant (`requestGrant`). Each grant
+  request has the user that the command runs as (`GrantRequest.user`):
+  - `uid`: the user ID of the command.
+  - `name`: the user name from `/etc/passwd` of the container, or empty.
+    The container controls this text, so the host cleans it before it
+    shows it.
+  - `verified`: true if the kernel gave the user of the client on the
+    local MCP socket. False for the old HTTP endpoint, which runs the
+    command as the sandbox user.
+
+  The host shows this user in the approval prompt. An older guest sends
+  no user, and the prompt then shows `unknown`. See
+  [Command user](./mcp.md#command-user).
 - **`LogSink`** — guest-side tracing records, streamed to the host's
   `<sandbox>/airlock.log`.
 - **`Clipboard`** — host clipboard access, handed to the guest inside

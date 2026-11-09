@@ -157,7 +157,8 @@ pub(super) fn setup(mounts: &MountConfig, nested_virt: bool) -> anyhow::Result<(
             "mode=0755",
         )?;
         crate::bridge::set_bridge_tmpfs_mounted();
-        // The adapter is optional. A failure stops only the MCP socket path.
+        // A failure does not stop the boot. The MCP socket still starts,
+        // but agents then have no adapter to connect to it.
         if let Err(e) = install_mcp_adapter(&bridge) {
             warn!("MCP adapter not installed: {e:#}");
         }
