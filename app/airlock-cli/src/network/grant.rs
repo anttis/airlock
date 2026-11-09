@@ -41,7 +41,7 @@ use super::rules::{OnDemandRule, parse_pattern};
 use super::target::{InjectedSecret, NetworkTarget, ip_literal, is_public_ip};
 use super::{Network, add_secrets};
 use crate::approval::{
-    Approval, Approver, Decision, GrantPrompt, PromptCommand, PromptRequest, Running,
+    Approval, Approver, Decision, GrantPrompt, PromptCommand, PromptRequest, PromptUser, Running,
 };
 use crate::config::config_values::{Grants, NetworkRule, Policy, RuleEditing, RuleEnabled};
 use crate::messages::grants as msg;
@@ -505,6 +505,22 @@ fn set_texts(mut list: capnp::text_list::Builder<'_>, items: &[String]) {
     }
 }
 
+/// Read the user of the command from a grant request. An old guest does
+/// not set it.
+fn read_user(
+    req: &airlock_common::network_capnp::grant_request::Reader<'_>,
+) -> Result<PromptUser, capnp::Error> {
+    if !req.has_user() {
+        return Ok(PromptUser::default());
+    }
+    let user = req.get_user()?;
+    Ok(PromptUser {
+        uid: Some(user.get_uid()),
+        name: user.get_name()?.to_str()?.to_string(),
+        verified: user.get_verified(),
+    })
+}
+
 /// One grant request from the guest.
 struct Request {
     cmd: String,
@@ -512,6 +528,7 @@ struct Request {
     rule: String,
     env: Vec<String>,
     cwd: String,
+    user: PromptUser,
 }
 
 /// An approved grant, ready to send to the guest.
@@ -541,6 +558,7 @@ pub(super) async fn request(
         rule: req.get_rule()?.to_str()?.to_string(),
         env: text_list(req.get_env()?)?,
         cwd: req.get_cwd()?.to_str()?.to_string(),
+        user: read_user(&req)?,
     };
     match decide(network, request).await {
         Ok(granted) => {
@@ -607,10 +625,13 @@ fn grant_context(network: &Network, rule: bool) -> Result<Rc<GrantContext>, Deni
 async fn decide(network: Rc<Network>, req: Request) -> Result<Granted, Denial> {
     let cmd_log: String = req.cmd.chars().take(LOG_CMD_CHARS).collect();
     info!(
-        "grant: request for [{}] rule {:?}, cmd {cmd_log:?}, {} env entries",
+        "grant: request for [{}] rule {:?}, cmd {cmd_log:?}, {} env entries, uid {:?} \
+         (verified {})",
         req.hosts.join(", "),
         req.rule,
-        req.env.len()
+        req.env.len(),
+        req.user.uid,
+        req.user.verified
     );
     let context = grant_context(&network, req.hosts.is_empty() && !req.rule.is_empty())?;
     let duration_secs = network.grants.max_duration_secs;
@@ -619,6 +640,7 @@ async fn decide(network: Rc<Network>, req: Request) -> Result<Granted, Denial> {
         cmd: req.cmd,
         env: req.env,
         duration_secs,
+        user: req.user,
     };
     let (access, hosts, prompt) = match (req.hosts.is_empty(), req.rule.is_empty()) {
         (false, true) if req.hosts.iter().any(|h| h.trim() == ALL_HOSTS) => {

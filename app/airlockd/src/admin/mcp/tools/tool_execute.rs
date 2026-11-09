@@ -10,6 +10,7 @@ use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
 use super::{AdminTools, tool_error};
+use crate::admin::caller::Caller;
 use crate::admin::mcp::bridge::{ExecOutput, ExecRequest};
 
 /// Description of the `execute` tool for the agent.
@@ -21,6 +22,17 @@ for tool managers and first installs. Do not add hosts one at a time. \
 The result `hosts` lists the hosts that the command \
 connected to and if the sandbox blocked them. `aborted` is true if the user \
 stopped the command.";
+
+/// Start of the `execute` description on the old HTTP endpoint.
+const HTTP_NOTE: &str = "DEPRECATED on this HTTP endpoint: the command runs as \
+the sandbox user, not as your user, and a later release removes this tool \
+here. Connect the `airlock` MCP server through the stdio adapter \
+/run/airlock/bin/airlock-mcp. ";
+
+/// Get the `execute` description of the old HTTP endpoint.
+pub(super) fn http_description() -> String {
+    format!("{HTTP_NOTE}{EXECUTE}")
+}
 
 /// Environment variables that the command cannot set. These keys can make the
 /// shell, the dynamic loader or an interpreter run other code, or send the
@@ -101,7 +113,7 @@ impl AdminTools {
         ct: CancellationToken,
     ) -> Result<Json<ExecOutput>, CallToolResult> {
         let grants = self.grants()?;
-        let req = check(args).map_err(|e| tool_error(&e))?;
+        let req = check(args, self.caller).map_err(|e| tool_error(&e))?;
         // A client disconnect cancels the token. Then the reply receiver
         // drops, and the grant task stops the command.
         let result = tokio::select! {
@@ -113,10 +125,14 @@ impl AdminTools {
 }
 
 /// Check the `execute` arguments.
+/// Args:
+///  - `args`: Arguments of the call
+///  - `caller`: Client of the connection. Only this value selects the user
+///    of the command, never an argument.
 ///
 /// Returns:
 ///   Request for the grant task, or error text for the agent.
-fn check(args: ExecuteArgs) -> Result<ExecRequest, String> {
+fn check(args: ExecuteArgs, caller: Caller) -> Result<ExecRequest, String> {
     if args.cmd.trim().is_empty() {
         return Err("The `cmd` is empty.".into());
     }
@@ -140,6 +156,7 @@ fn check(args: ExecuteArgs) -> Result<ExecRequest, String> {
         cwd: args.cwd.filter(|c| !c.is_empty()),
         hosts,
         rule,
+        caller,
     })
 }
 

@@ -6,7 +6,7 @@ into the sandbox. The ACP support is built in (`copilot --acp`). See [editor int
 
 ```toml
 [packs]
-copilot = { version = "2" }
+copilot = { version = "3" }
 ```
 
 ```bash
@@ -45,3 +45,42 @@ token types, see the [Copilot CLI authentication docs][copilot-auth].
 Since version 2, the pack configures Copilot to use the `airlock` MCP
 server for advanced interactive sandbox control. See
 [Temporary network grants](../../technical/networking.md#temporary-network-grants).
+
+| Version | MCP connection | `execute` commands run as |
+|---------|----------------|---------------------------|
+| 3       | Stdio adapter `/run/airlock/bin/airlock-mcp` | The user of Copilot |
+| 2       | HTTP endpoint `http://admin.airlock/mcp` (deprecated for `execute`) | The sandbox user |
+
+Version 3 is the same as version 2, except for the MCP entry. The
+adapter lets airlock get the user of Copilot from the kernel. Over HTTP,
+airlock cannot get this user. See [MCP](../../technical/mcp.md#admin-mcp-server).
+
+The setup wizard offers version 3. A sandbox with version 2 keeps its
+install. To use the adapter, set `version = "3"`. A change of the
+version is a [changed pack](../../technical/packs.md#install-state).
+
+The pack writes the MCP entry to
+`/usr/local/share/airlock/copilot-mcp.json`. The `copilot` command of
+the pack gives this file to Copilot.
+
+### Without the pack
+
+For Copilot without the pack, add a `local` server to
+`~/.copilot/mcp-config.json`:
+
+```json
+{
+  "mcpServers": {
+    "airlock": {
+      "type": "local",
+      "command": "/run/airlock/bin/airlock-mcp",
+      "args": [],
+      "tools": ["*"],
+      "timeout": 86400000
+    }
+  }
+}
+```
+
+An `execute` call waits for your approval. Thus the pack sets a timeout
+of 24 hours (in milliseconds). Copilot refuses a timeout of 0.

@@ -89,6 +89,19 @@ pub enum PromptRequest {
     },
 }
 
+/// User that the command of an access request runs as.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PromptUser {
+    /// User ID, or `None` if the sandbox did not tell it.
+    pub uid: Option<u32>,
+    /// User name from the account data of the sandbox, or empty. The
+    /// sandbox controls this text.
+    pub name: String,
+    /// True if the sandbox verified the user of the client. False for the
+    /// old HTTP connection, which runs the command as the sandbox user.
+    pub verified: bool,
+}
+
 /// Command of an access request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptCommand {
@@ -100,6 +113,8 @@ pub struct PromptCommand {
     pub env: Vec<String>,
     /// Maximum duration of the access, in seconds.
     pub duration_secs: u32,
+    /// User that the command runs as.
+    pub user: PromptUser,
 }
 
 /// Decision of the user.

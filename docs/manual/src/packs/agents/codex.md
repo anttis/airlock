@@ -5,7 +5,7 @@ The `codex` pack installs the
 
 ```toml
 [packs]
-codex = { version = "2" }
+codex = { version = "3" }
 ```
 
 ```bash
@@ -49,3 +49,31 @@ gets only a surrogate.
 Since version 2, the pack configures Codex to use the `airlock` MCP
 server for advanced interactive sandbox control. See
 [Temporary network grants](../../technical/networking.md#temporary-network-grants).
+
+| Version | MCP connection | `execute` commands run as |
+|---------|----------------|---------------------------|
+| 3       | Stdio adapter `/run/airlock/bin/airlock-mcp` | The user of Codex |
+| 2       | HTTP endpoint `http://admin.airlock/mcp` (deprecated for `execute`) | The sandbox user |
+
+Version 3 is the same as version 2, except for the MCP entry. The
+adapter lets airlock get the user of Codex from the kernel. Over HTTP,
+airlock cannot get this user. See [MCP](../../technical/mcp.md#admin-mcp-server).
+
+The setup wizard offers version 3. A sandbox with version 2 keeps its
+install. To use the adapter, set `version = "3"`. A change of the
+version is a [changed pack](../../technical/packs.md#install-state).
+
+The pack writes the MCP entry to `/etc/codex/config.toml`.
+
+### Without the pack
+
+For Codex without the pack, add the server to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.airlock]
+command = "/run/airlock/bin/airlock-mcp"
+tool_timeout_sec = 86400
+```
+
+Codex cannot turn off the tool timeout. An `execute` call waits for your
+approval, so the pack sets a timeout of one day.

@@ -19,6 +19,9 @@ directly via fork + setns + exec:
   params). The host resolves the image's `USER` the same way Docker
   does: it looks up names in the image's own `/etc/passwd` and
   `/etc/group`.
+- **Working directory** entered after the uid/gid switch, so the kernel
+  checks the access of the container user. If the user cannot enter the
+  directory, the process starts in `/`.
 - **PTY** allocated when stdin is a TTY. The CLI sends the host
   terminal size as the initial PTY dimensions and forwards resize
   events (SIGWINCH).

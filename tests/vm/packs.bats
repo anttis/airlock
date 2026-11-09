@@ -8,9 +8,9 @@ load helpers
 
 # The config of all packs.
 PACKS='[packs]
-claude = { version = 2 }
-codex = { version = 2 }
-copilot = { version = 2 }
+claude = { version = 3 }
+codex = { version = 3 }
+copilot = { version = 3 }
 nodejs = { version = 1 }
 python = { version = 1 }
 rust = { version = 1 }
@@ -22,7 +22,7 @@ mise = { version = 1 }'
 # also write their airlock MCP and hook files.
 VERSIONS='claude --version && codex --version && copilot --version && node --version &&
 test -s /etc/claude-code/managed-settings.d/50-airlock.json &&
-grep -q admin.airlock/mcp /etc/codex/config.toml && test -s /etc/codex/hooks.json &&
+grep -q /run/airlock/bin/airlock-mcp /etc/codex/config.toml && test -s /etc/codex/hooks.json &&
 test -s /etc/github-copilot/policy.d/50-airlock.json &&
 test -s /usr/local/share/airlock/copilot-mcp.json &&
 npm --version && python3 --version && cargo --version && rustc --version &&

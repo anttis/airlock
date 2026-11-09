@@ -7,13 +7,19 @@
 //! the probable cause of a failed tool call. The `airlock` MCP server lets
 //! an agent run a command with extended network access and manage
 //! on-demand network rules. The user approves each request.
+//!
+//! The `airlock` MCP server is also on a local socket. The kernel gives the
+//! user of each socket client, and the commands of that client run as that
+//! user. The command tool of the HTTP service is deprecated.
 
 pub mod blocked_hosts;
+pub mod caller;
 pub mod capabilities;
 pub mod deny_tracker;
 pub mod mcp;
 pub mod routes;
 pub mod server;
+pub mod socket;
 pub mod state;
 pub mod tool_tracker;
 

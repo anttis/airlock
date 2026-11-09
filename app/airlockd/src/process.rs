@@ -155,7 +155,7 @@ pub fn spawn_user(
     // The diagnostic pipe tells which syscall failed in the pre-exec hook.
     // Error strings cannot cross the fork/exec boundary. Only the errno can.
     let (diag_r, diag_w) = open_diag_pipe();
-    let pre_exec = build_pre_exec(cwd.to_string(), uid, gid, harden, None, true, diag_w);
+    let pre_exec = build_pre_exec(cwd.to_string(), uid, gid, harden, None, Entry::FULL, diag_w);
 
     let result = spawn(cmd, args, env_pairs, pre_exec, pty_size);
     finish_diag_pipe(diag_r, diag_w, result)
@@ -191,7 +191,7 @@ pub fn spawn_daemon(
 
     let env_pairs = env_string_pairs(env);
     let (diag_r, diag_w) = open_diag_pipe();
-    let pre_exec = build_pre_exec(cwd.to_string(), uid, gid, harden, None, true, diag_w);
+    let pre_exec = build_pre_exec(cwd.to_string(), uid, gid, harden, None, Entry::FULL, diag_w);
 
     let stdout_dup = stdout_file.try_clone().context("dup daemon stdout")?;
     let stderr_dup = stderr_file.try_clone().context("dup daemon stderr")?;
@@ -236,6 +236,9 @@ pub struct CollectSpec {
     /// Number of bytes to keep from the end of stdout, and the same for
     /// stderr.
     pub output_limit: usize,
+    /// Test only: change to `uid` and `gid` also in unit tests. Needs root.
+    #[cfg(test)]
+    pub real_creds: bool,
 }
 
 /// Result of a command from [`spawn_collect`].
@@ -268,8 +271,9 @@ pub struct CollectHandle {
 
 /// Start a shell command in the container that runs to the end. stdin is
 /// `/dev/null`. stdout and stderr go to memory, see [`CollectHandle::wait`].
-/// In unit tests, the command runs as the test user outside the container,
-/// and `uid`, `gid` and `harden` have no effect.
+/// In unit tests, the command runs outside the container and `harden` has
+/// no effect. It also runs as the test user, unless the spec sets
+/// `real_creds`.
 /// Args:
 ///  - `spec`: Command, environment, cwd, network namespace and output limit
 ///  - `uid`, `gid`, `harden`: Same as in [`spawn_user`]
@@ -286,12 +290,17 @@ pub fn spawn_collect(
     use std::os::fd::AsRawFd;
     use std::process::Stdio;
 
+    #[cfg(test)]
+    let switch_creds = spec.real_creds;
+    #[cfg(not(test))]
+    let switch_creds = true;
     let CollectSpec {
         cmd,
         env,
         cwd,
         netns: netns_fd,
         output_limit,
+        ..
     } = spec;
     let env_pairs = env_string_pairs(&env);
     let (diag_r, diag_w) = open_diag_pipe();
@@ -299,9 +308,21 @@ pub fn spawn_collect(
     // pre-exec hook can use it. `netns_fd` keeps it open until the spawn
     // returns.
     let netns = netns_fd.as_ref().map(AsRawFd::as_raw_fd);
-    // Unit tests run without root and without a container rootfs. They
-    // skip the container entry and the credential change.
-    let pre_exec = build_pre_exec(cwd, uid, gid, harden, netns, !cfg!(test), diag_w);
+    // Unit tests run without a container rootfs, so they skip the
+    // container entry. They skip the credential change too, unless the
+    // test runs as root and asks for it.
+    let pre_exec = build_pre_exec(
+        cwd,
+        uid,
+        gid,
+        harden,
+        netns,
+        Entry {
+            rootfs: !cfg!(test),
+            creds: switch_creds,
+        },
+        diag_w,
+    );
 
     let mut command = tokio::process::Command::new("/bin/sh");
     command
@@ -560,21 +581,23 @@ fn finish_diag_pipe<T>(diag_r: i32, diag_w: i32, result: anyhow::Result<T>) -> a
 ///
 /// Steps: join the network namespace `netns` (if given), enter the
 /// container rootfs (join the sandbox mount namespace, or chroot if init
-/// could not make it), harden, chdir, setgroups, setgid, setuid. If
-/// `container` is `false`, only the network namespace and chdir steps run
-/// (unit tests). On a hard failure, the hook writes a short step tag to
-/// `diag_w`, so the parent can add it to the error as context.
+/// could not make it), harden, setgroups, setgid, setuid, chdir. `entry`
+/// can skip the rootfs steps and the credential steps (unit tests). On a
+/// hard failure, the hook writes a short step tag to `diag_w`, so the
+/// parent can add it to the error as context.
 fn build_pre_exec(
     cwd: String,
     uid: u32,
     gid: u32,
     harden: bool,
     netns: Option<i32>,
-    container: bool,
+    entry: Entry,
     diag_w: i32,
 ) -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static {
     // Allocate before fork. The hook can only make raw syscalls.
     let rootfs = std::ffi::CString::new(crate::sandbox_ns::ROOTFS).unwrap();
+    // A cwd with a NUL byte cannot exist. Use `/` for it.
+    let cwd_cstr = std::ffi::CString::new(cwd).unwrap_or_else(|_| c"/".to_owned());
     let ns_fd = crate::sandbox_ns::fd();
     // Only Linux uses `harden` and `ns_fd`. They are always there, so the
     // code is the same on all platforms.
@@ -603,72 +626,91 @@ fn build_pre_exec(
             fail!(b"setns(grant net ns)");
         }
 
-        let cwd_cstr = std::ffi::CString::new(cwd.as_str()).unwrap();
-        if !container {
-            unsafe { libc::chdir(cwd_cstr.as_ptr()) };
-            return Ok(());
-        }
-
-        // Enter the container rootfs. Join the shared sandbox mount namespace
-        // (its root is the rootfs, see `crate::sandbox_ns`), or use chroot if
-        // init could not make it. setns must come before the hardening
-        // unshare below. The unshare then makes a private copy of this
-        // namespace. setns also moves the cwd to the new root. The chdir
-        // below sets the correct cwd.
-        #[cfg(target_os = "linux")]
-        let entered = match ns_fd {
-            Some(fd) => {
-                if unsafe { libc::setns(fd, libc::CLONE_NEWNS) } != 0 {
-                    fail!(b"setns(sandbox mount ns)");
+        if entry.rootfs {
+            // Enter the container rootfs. Join the shared sandbox mount namespace
+            // (its root is the rootfs, see `crate::sandbox_ns`), or use chroot if
+            // init could not make it. setns must come before the hardening
+            // unshare below. The unshare then makes a private copy of this
+            // namespace. setns also moves the cwd to the new root. The chdir
+            // below sets the correct cwd.
+            #[cfg(target_os = "linux")]
+            let entered = match ns_fd {
+                Some(fd) => {
+                    if unsafe { libc::setns(fd, libc::CLONE_NEWNS) } != 0 {
+                        fail!(b"setns(sandbox mount ns)");
+                    }
+                    true
                 }
-                true
-            }
-            None => false,
-        };
-        #[cfg(not(target_os = "linux"))]
-        let entered = false;
+                None => false,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let entered = false;
 
-        #[cfg(target_os = "linux")]
-        if harden {
-            // Prevent privilege escalation through setuid/setcap binaries.
-            if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
-                fail!(b"prctl(PR_SET_NO_NEW_PRIVS)");
+            #[cfg(target_os = "linux")]
+            if harden {
+                // Prevent privilege escalation through setuid/setcap binaries.
+                if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
+                    fail!(b"prctl(PR_SET_NO_NEW_PRIVS)");
+                }
+                // Best-effort namespace isolation: private mount, IPC and UTS
+                // namespaces. The network namespace is shared on purpose, so the
+                // container has network access. Failures are ignored, because
+                // the primary security (NO_NEW_PRIVS, the rootfs root, setuid)
+                // stays.
+                unsafe { libc::unshare(libc::CLONE_NEWNS) };
+                unsafe { libc::unshare(libc::CLONE_NEWIPC) };
+                unsafe { libc::unshare(libc::CLONE_NEWUTS) };
             }
-            // Best-effort namespace isolation: private mount, IPC and UTS
-            // namespaces. The network namespace is shared on purpose, so the
-            // container has network access. Failures are ignored, because
-            // the primary security (NO_NEW_PRIVS, the rootfs root, setuid)
-            // stays.
-            unsafe { libc::unshare(libc::CLONE_NEWNS) };
-            unsafe { libc::unshare(libc::CLONE_NEWIPC) };
-            unsafe { libc::unshare(libc::CLONE_NEWUTS) };
+
+            if !entered && unsafe { libc::chroot(rootfs.as_ptr()) } != 0 {
+                fail!(b"chroot(/mnt/overlay/rootfs)");
+            }
         }
 
-        if !entered && unsafe { libc::chroot(rootfs.as_ptr()) } != 0 {
-            fail!(b"chroot(/mnt/overlay/rootfs)");
+        if entry.creds {
+            // Remove the supplementary groups before the privilege drop.
+            // Otherwise the process keeps the groups of airlockd (root), which
+            // usually include GID 0, also with an unprivileged uid. Must run as
+            // root, before setuid. `setgroups` is async-signal-safe (a bare
+            // syscall).
+            if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
+                fail!(b"setgroups");
+            }
+            // setgid must run before setuid. After setuid drops root, the
+            // process cannot change its gid.
+            if unsafe { libc::setgid(gid) } != 0 {
+                fail!(b"setgid");
+            }
+            if unsafe { libc::setuid(uid) } != 0 {
+                fail!(b"setuid");
+            }
         }
+        // chdir runs after the privilege drop, so the kernel checks the
+        // path with the credentials of the command. As root, a process can
+        // enter a directory below a parent that the user cannot search.
+        // Use `/` if the user cannot enter the cwd.
         if unsafe { libc::chdir(cwd_cstr.as_ptr()) } != 0 {
-            let root = std::ffi::CString::new("/").unwrap();
-            unsafe { libc::chdir(root.as_ptr()) };
-        }
-        // Remove the supplementary groups before the privilege drop.
-        // Otherwise the process keeps the groups of airlockd (root), which
-        // usually include GID 0, also with an unprivileged uid. Must run as
-        // root, before setuid. `setgroups` is async-signal-safe (a bare
-        // syscall).
-        if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
-            fail!(b"setgroups");
-        }
-        // setgid must run before setuid. After setuid drops root, the
-        // process cannot change its gid.
-        if unsafe { libc::setgid(gid) } != 0 {
-            fail!(b"setgid");
-        }
-        if unsafe { libc::setuid(uid) } != 0 {
-            fail!(b"setuid");
+            unsafe { libc::chdir(c"/".as_ptr()) };
         }
         Ok(())
     }
+}
+
+/// Setup steps of [`build_pre_exec`] that a spawn uses.
+#[derive(Clone, Copy)]
+struct Entry {
+    /// Enter the container rootfs and harden.
+    rootfs: bool,
+    /// Change the supplementary groups, gid and uid.
+    creds: bool,
+}
+
+impl Entry {
+    /// All steps, for processes in the container.
+    const FULL: Self = Self {
+        rootfs: true,
+        creds: true,
+    };
 }
 
 /// Start a child process with a PTY or with pipes. All spawn functions
@@ -1031,6 +1073,7 @@ mod tests {
             cwd: "/".into(),
             netns: None,
             output_limit,
+            real_creds: false,
         }
     }
 

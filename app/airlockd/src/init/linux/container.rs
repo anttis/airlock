@@ -134,15 +134,16 @@ pub(super) fn setup(mounts: &MountConfig, nested_virt: bool) -> anyhow::Result<(
     )?;
 
     // /run/airlock: a tmpfs for host-bridge FIFOs and shims (clipboard,
-    // browser), new at each boot. Thus no bridge file persists in the
-    // overlay upper layer.
+    // browser) and for the MCP adapter and socket, new at each boot. Thus
+    // no bridge file persists in the overlay upper layer.
     //
     // The guest controls the upper layer. This mount runs in the VM, not in
     // the sandbox root, so a symlink at /run or /run/airlock could send the
     // mount to a path that the guest selects. Thus a symlink at one of them
-    // skips the tmpfs. The bridges still work then: they resolve their paths with
-    // chroot semantics (`bridge::in_rootfs`). Only their files persist in
-    // the upper layer.
+    // skips the tmpfs. The FIFO bridges still work then: they resolve their
+    // paths with chroot semantics (`bridge::in_rootfs`). Only their files
+    // persist in the upper layer. The MCP adapter and socket need a
+    // directory that guest users cannot change, so they are not made.
     if let Err(e) = refuse_symlinks(Path::new(root), BRIDGE_REL) {
         warn!("/run/airlock tmpfs skipped: {e:#}");
     } else {
@@ -155,6 +156,11 @@ pub(super) fn setup(mounts: &MountConfig, nested_virt: bool) -> anyhow::Result<(
             libc::MS_NOSUID | libc::MS_NODEV,
             "mode=0755",
         )?;
+        crate::bridge::set_bridge_tmpfs_mounted();
+        // The adapter is optional. A failure stops only the MCP socket path.
+        if let Err(e) = install_mcp_adapter(&bridge) {
+            warn!("MCP adapter not installed: {e:#}");
+        }
     }
 
     // /airlock/disk: the ext4 project disk (or tmpfs if there is no disk),
@@ -217,6 +223,30 @@ fn refuse_symlinks(root: &Path, rel: &str) -> anyhow::Result<()> {
             Err(e) => anyhow::bail!("stat {}: {e}", path.display()),
         }
     }
+    Ok(())
+}
+
+/// Make the stdio adapter of the `airlock` MCP server available in the
+/// container, at `airlock_common::MCP_ADAPTER`. The adapter is this binary
+/// in a read-only bind. It selects its mode from the program name.
+///
+/// The bind is in the per-boot tmpfs of airlockd. The directory belongs to
+/// root, so guest users cannot replace the adapter. The sandbox mount
+/// namespace gets a copy of this mount, because it is made later.
+/// Args:
+///  - `bridge`: `/run/airlock` tmpfs as this process sees it
+fn install_mcp_adapter(bridge: &str) -> anyhow::Result<()> {
+    let rel = airlock_common::MCP_ADAPTER
+        .strip_prefix(airlock_common::BRIDGE_DIR)
+        .unwrap_or(airlock_common::MCP_ADAPTER);
+    let dst = format!("{bridge}{rel}");
+    if let Some(dir) = Path::new(&dst).parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::File::create(&dst)?;
+    let exe = std::env::current_exe()?;
+    super::mount::bind(&exe.to_string_lossy(), &dst, true)?;
+    info!("{} → {}", airlock_common::MCP_ADAPTER, exe.display());
     Ok(())
 }
 

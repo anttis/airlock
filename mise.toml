@@ -13,6 +13,11 @@ quiet = true
 description = "Run Rust unit tests"
 run = "cargo test --workspace"
 
+[tasks."test:root"]
+quiet = true
+description = "Run the airlockd tests that need root (user changes)"
+run = "cargo test -p airlockd root_ -- --ignored"
+
 [tasks.bats]
 quiet = true
 description = "Run all bats tests"

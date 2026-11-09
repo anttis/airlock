@@ -46,6 +46,7 @@ pub async fn start(
     info!("admin listening on {}:{}", ADMIN_ADDR.0, ADMIN_ADDR.1);
 
     let grants = GrantBridge::start(grants);
+    super::socket::start(Some(grants.clone()), caps);
     let app = app(state, mcp, Some(grants), caps);
     tokio::task::spawn_local(async move {
         if let Err(e) = axum::serve(listener, app).await {

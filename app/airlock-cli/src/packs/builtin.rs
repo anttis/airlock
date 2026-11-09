@@ -268,9 +268,9 @@ values = ["a", "b"]
             [
                 "alpine@1",
                 "debian@1",
-                "claude@2",
-                "codex@2",
-                "copilot@2",
+                "claude@3",
+                "codex@3",
+                "copilot@3",
                 "docker@1",
                 "git@1",
                 "mise@1",
