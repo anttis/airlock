@@ -29,7 +29,8 @@ to the service through an interceptor.
 The browser bridge opens the sign-in page on the host:
 
 1. The agent runs `xdg-open` or `$BROWSER`. Both are a guest shim in
-   `/run/airlock/bin`, a tmpfs for each boot.
+   `/run/airlock/bin`, a tmpfs for each boot. The tmpfs also has the
+   [MCP socket and adapter](./mcp.md#local-socket).
 2. The shim writes the URL to a FIFO. `airlockd` calls `Browser.open`.
 3. The host checks the URL: https, no userinfo, port or fragment, and a
    limit of 5 opens per minute.

@@ -24,10 +24,13 @@ mod tools;
 use std::sync::Arc;
 
 use axum::Router;
+#[cfg(test)]
+pub(crate) use bridge::HTTP_EXECUTE_DEPRECATED;
 pub use bridge::{GrantBridge, GrantContext, SpawnCreds};
 pub(crate) use instructions::instructions;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+pub(crate) use tools::AdminTools;
 
 use super::capabilities::Capabilities;
 

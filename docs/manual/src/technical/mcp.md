@@ -1,11 +1,11 @@
 # MCP
 
 The supervisor in the VM serves all MCP endpoints of the sandbox. One
-local HTTP server on the guest loopback (port 80) serves them. The
-virtual DNS resolves all `*.airlock` names to this address (see
-[Networking](./networking.md#virtual-dns)). The traffic never goes
-through the TCP proxy and never leaves the VM. The server picks the
-endpoints by the host name of the request:
+local HTTP server on the guest loopback (port 80) serves the HTTP
+endpoints. The virtual DNS resolves all `*.airlock` names to this
+address (see [Networking](./networking.md#virtual-dns)). The traffic
+never goes through the TCP proxy and never leaves the VM. The server
+picks the endpoints by the host name of the request:
 
 | Host name         | Endpoints                                        |
 |-------------------|--------------------------------------------------|
@@ -13,17 +13,25 @@ endpoints by the host name of the request:
 | `mcp.airlock`     | MCP servers of the config, `/<name>`             |
 | `acp.mcp.airlock` | MCP servers of editor sessions, `/<key>/<name>`  |
 
-All endpoints use the MCP Streamable HTTP transport. They refuse
+All HTTP endpoints use the MCP Streamable HTTP transport. They refuse
 requests from web pages of other origins. This is a guard against DNS
 rebinding.
 
+The supervisor also serves the `airlock` MCP server on a local Unix
+socket. See [Local socket](#local-socket).
+
 ## Admin MCP server
 
-The `airlock` MCP server at `http://admin.airlock/mcp` gives the agent
-tools for the network policy. It is stateless and sends JSON responses.
-It has no MCP sessions. It accepts only the `Host` names
-`admin.airlock`, `localhost` and `127.0.0.1`.
+The `airlock` MCP server gives the agent tools for the network policy.
+It has two endpoints:
 
+| Endpoint                   | Transport                         | Commands of `execute` run as   |
+|----------------------------|-----------------------------------|--------------------------------|
+| `/run/airlock/mcp.sock`    | Unix socket, one message per line | The user of the client         |
+| `http://admin.airlock/mcp` | Streamable HTTP                   | The sandbox user (deprecated)  |
+
+Agents connect to the socket through the
+[stdio adapter](#stdio-adapter). Both endpoints offer the same tools.
 The server offers only the tools of the features that the host enables
 at boot:
 
@@ -41,13 +49,78 @@ with instructions. The text describes only the enabled tools. For the
 meaning of grants, on-demand rules and rule changes, see
 [Temporary network grants](./networking.md#temporary-network-grants).
 
-The [agent packs](../packs/agents.md) `claude@2`, `codex@2` and
-`copilot@2` connect the agent to this server. They also give the agent
-the tool instructions at the start of each session. Hooks tell the agent
-when the network policy blocked a connection during a tool call. Codex
-runs shell commands in its own sandbox. That sandbox has no network
-unless you start Codex with `--yolo`. Without `--yolo`, airlock sees no
-denied connections.
+The [agent packs](../packs/agents.md) `claude@3`, `codex@3` and
+`copilot@3` connect the agent to the server through the stdio adapter.
+The `@2` versions of these packs use the HTTP endpoint. All these packs
+also give the agent the tool instructions at the start of each session.
+Hooks on the HTTP endpoint tell the agent when the network policy
+blocked a connection during a tool call. Codex runs shell commands in
+its own sandbox. That sandbox has no network unless you start Codex with
+`--yolo`. Without `--yolo`, airlock sees no denied connections.
+
+### Local socket
+
+The socket `/run/airlock/mcp.sock` is in `/run/airlock`. This directory
+is a tmpfs that the supervisor makes at each boot. It belongs to root
+and has mode 0755. Thus guest users cannot replace the files in it. The
+socket has mode 0666, so all guest users can connect.
+
+- Each connection is one MCP session. The messages are JSON-RPC, one
+  message on each line. This is the same framing as the MCP stdio
+  transport.
+- At connect time, the kernel gives the user ID, the group ID and the
+  process ID of the client. The `execute` commands of the session run as
+  this user. No tool argument can change the user. See
+  [Command user](#command-user).
+- A client must complete the MCP initialization in 30 seconds. If it
+  does not, the supervisor closes the connection.
+- At most 64 connections can be open at the same time. The supervisor
+  closes a new connection above this limit.
+- When the client disconnects, the session ends and the supervisor stops
+  the running command. This can take up to 5 seconds, because the MCP
+  library first waits for the pending replies.
+
+### Stdio adapter
+
+Agents start a local MCP server as a program with stdin and stdout. The
+adapter `/run/airlock/bin/airlock-mcp` is such a program. It is the
+supervisor binary in a read-only bind. Its program name selects the
+adapter mode.
+
+- The agent starts the adapter as a stdio MCP server. The adapter runs
+  as the user of the agent and has no other rights. Thus the server gets
+  the user of the agent from the kernel.
+- The adapter sends the bytes of its stdin to the socket, and the bytes
+  of the socket to its stdout. It does not change the messages.
+- At the end of stdin, the adapter still sends the pending replies to
+  stdout. It stops when the server closes the connection.
+- If the socket is not available, the adapter writes an error to stderr
+  and exits with code 1. It never uses the HTTP endpoint.
+
+The guest controls the image. A symlink at `/run` or `/run/airlock` in
+the image could send the tmpfs mount to a different path. Thus the
+supervisor does not mount the tmpfs if one of them is a symlink. Then
+the socket and the adapter do not exist, and the agent cannot start the
+adapter (command not found). The clipboard and browser bridges still
+work in this case.
+
+### HTTP endpoint
+
+The endpoint `http://admin.airlock/mcp` is stateless and sends JSON
+responses. It has no MCP sessions. It accepts only the `Host` names
+`admin.airlock`, `localhost` and `127.0.0.1`.
+
+The HTTP endpoint cannot get the user of the client from the kernel.
+Thus its `execute` tool is deprecated:
+
+- It still runs the commands as the sandbox user.
+- Its tool description starts with a `DEPRECATED` note that names the
+  stdio adapter.
+- Each result has a `warning` field with the deprecation text.
+- A later release removes `execute` from this endpoint.
+
+The manual tools, the rule tools and the hooks of the agent packs stay
+on the HTTP endpoint with no change.
 
 ### Request flow
 
@@ -57,7 +130,8 @@ request to the host over the network channel (see [RPC](./rpc.md)):
 1. The tool checks its arguments. For `execute`, it refuses environment
    keys that change program start, code loading, certificates or
    proxies, for example `PATH` and `LD_*`.
-2. The supervisor sends the request to the host. The host checks it
+2. The supervisor sends the request to the host. For `execute`, the
+   request also has the user of the command. The host checks the request
    against the config and refuses a request that the config does not
    permit. It does not ask the user then.
 3. The host asks the user (see [Approvals](./approvals.md)). The answer
@@ -76,8 +150,9 @@ The supervisor then:
    through the grant proxy. The main network refuses local packets that
    use a grant address as source. Thus other processes cannot use the
    grant without root rights.
-2. Runs the command with `sh -c` in the namespace, as the sandbox user.
-   The command gets the sandbox environment and the CA variables.
+2. Runs the command with `sh -c` in the namespace, as the
+   [command user](#command-user). The command gets the sandbox
+   environment and the CA variables.
 3. Stops the command when the time limit of the grant expires, when the
    MCP client disconnects, or when the user stops the grant on the host.
 4. Reads the grant log: the hosts that the command connected to, and if
@@ -86,7 +161,44 @@ The supervisor then:
    the open connections of the grant.
 
 The result has the exit code, the last 64 KiB of stdout and of stderr,
-the hosts, and a flag that tells if the user stopped the command.
+the hosts, and a flag that tells if the user stopped the command. On the
+HTTP endpoint, it also has the `warning` field.
+
+### Command user
+
+The endpoint of the client selects the user of the command:
+
+| Endpoint     | User and group                                          |
+|--------------|---------------------------------------------------------|
+| Local socket | User ID and primary group ID of the client, from the kernel |
+| HTTP         | The sandbox user, which the sandbox boots with          |
+
+The command has no supplementary groups. If the user is not the sandbox
+user, the supervisor changes some values of the sandbox environment:
+
+- `HOME` is the home directory of the user in `/etc/passwd` of the
+  container. If the file has no home for the user, `HOME` is `/`.
+- `USER` and `LOGNAME` get the user name from `/etc/passwd`, but only if
+  the sandbox environment has these keys.
+
+The supervisor does not follow a symbolic link at `/etc` or at
+`/etc/passwd` of the container. If one of them is a link, the supervisor
+uses no account data: `HOME` is `/`, `USER` and `LOGNAME` do not change,
+and the approval prompt shows only the user ID.
+
+A `HOME` in the `env` argument of `execute` overrides the value above.
+
+The supervisor enters the working directory after it changes the user.
+If the user cannot enter the directory, the command starts in `/`. This
+applies to all processes in the sandbox.
+
+### Security notes for the admin server
+
+- The socket identifies users, not processes. All processes of one user
+  have the same access.
+- A root process in the sandbox can act as any user.
+- The HTTP endpoint has no per-process access control. Any process in
+  the sandbox can call it.
 
 ## Host MCP servers
 

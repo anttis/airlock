@@ -150,7 +150,11 @@ enabled = true
 ```
 
 Airlock connects to the agent harness and gives the agent the necessary
-instructions. The `claude@2`, `codex@2` and `copilot@2` packs do this.
+instructions. The `claude@3`, `codex@3` and `copilot@3` packs do this.
+They connect the agent through the stdio adapter
+`/run/airlock/bin/airlock-mcp`. Then each command runs as the user of
+the agent. The `@2` versions use an HTTP endpoint that is deprecated for
+commands. See [MCP](../technical/mcp.md#admin-mcp-server).
 
 You must approve each network access on the host. By default, airlock
 asks with a system notification. You can change this in the

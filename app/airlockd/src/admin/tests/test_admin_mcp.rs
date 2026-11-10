@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::admin::mcp::HTTP_EXECUTE_DEPRECATED;
 use crate::admin::{AdminState, Capabilities, RuleEditing};
 use crate::test_cfg::{
     FakeDecision, FakeGrantHost, FakeRuleChange, FakeUpsert, GrantCall, block_on_local, call_tool,
@@ -179,7 +180,7 @@ fn execute_denied_by_user_gives_not_approved_result() {
             output_of(&result),
             json!({
                 "approved": false, "exit_code": null, "stdout": "", "stderr": "", "hosts": [],
-                "aborted": false,
+                "aborted": false, "warning": HTTP_EXECUTE_DEPRECATED,
             })
         );
         assert_eq!(
@@ -190,6 +191,9 @@ fn execute_denied_by_user_gives_not_approved_result() {
                 rule: "npm".into(),
                 env: vec!["MODE=ci".into()],
                 cwd: FakeGrantHost::BASE_CWD.into(),
+                // The HTTP endpoint keeps the sandbox user, and the test
+                // root has no account data.
+                user: (1000, String::new(), false),
             }]
         );
 
@@ -243,6 +247,7 @@ fn execute_granted_runs_command_and_returns_grant_log() {
                     { "host": "[2001:db8::1]:80", "blocked": true },
                 ],
                 "aborted": false,
+                "warning": HTTP_EXECUTE_DEPRECATED,
             })
         );
         eventually_async("grant release", async || {

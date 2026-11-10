@@ -71,6 +71,16 @@ pub const BROWSER_SHIM: &str = "/run/airlock/bin/xdg-open";
 /// Guest FIFO the browser shim writes URLs to.
 pub const BROWSER_FIFO: &str = "/run/airlock/browser.open";
 
+/// Guest path of the Unix socket of the `airlock` MCP server. The server
+/// gets the user of each client from the kernel and runs its commands as
+/// that user.
+pub const MCP_SOCKET: &str = "/run/airlock/mcp.sock";
+
+/// Guest path of the stdio adapter of the `airlock` MCP server. An agent
+/// starts it as a stdio MCP server. It relays the messages to
+/// [`MCP_SOCKET`] and has the user of the agent.
+pub const MCP_ADAPTER: &str = "/run/airlock/bin/airlock-mcp";
+
 /// Maximum size in bytes of one URL that the guest sends to the host browser.
 /// OAuth authorize URLs are much smaller than this. The host applies the same
 /// limit.

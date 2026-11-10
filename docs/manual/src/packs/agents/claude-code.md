@@ -5,7 +5,7 @@ The `claude` pack installs
 
 ```toml
 [packs]
-claude = { version = "2" }
+claude = { version = "3" }
 ```
 
 ```bash
@@ -50,6 +50,38 @@ Claude Code gets only a surrogate.
 Since version 2, the pack configures Claude Code to use the `airlock` MCP
 server for advanced interactive sandbox control. See
 [Temporary network grants](../../technical/networking.md#temporary-network-grants).
+
+| Version | MCP connection | `execute` commands run as |
+|---------|----------------|---------------------------|
+| 3       | Stdio adapter `/run/airlock/bin/airlock-mcp` | The user of Claude Code |
+| 2       | HTTP endpoint `http://admin.airlock/mcp` (deprecated for `execute`) | The sandbox user |
+
+Version 3 is the same as version 2, except for the MCP entry. The
+adapter lets airlock get the user of Claude Code from the kernel. Over HTTP,
+airlock cannot get this user. See [MCP](../../technical/mcp.md#admin-mcp-server).
+
+The setup wizard offers version 3. A sandbox with version 2 keeps its
+install. To use the adapter, set `version = "3"`. A change of the
+version is a [changed pack](../../technical/packs.md#install-state).
+
+The pack writes the MCP entry to `$HOME/.claude.json` of the user that
+runs the pack setup. Other users in the sandbox do not get the entry.
+
+### Without the pack
+
+For another user in the sandbox, or for Claude Code without the pack,
+add the server as that user:
+
+```bash
+claude mcp add --scope user airlock /run/airlock/bin/airlock-mcp
+```
+
+> [!NOTE]
+> A user change with `su -` removes the sandbox environment. Then Claude
+> Code does not get `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` from the pack.
+> Without this value, Claude Code stops an `execute` call after 5
+> minutes of idle time, also while the call waits for your approval. Set
+> the value again in the new shell.
 
 ## Clipboard
 

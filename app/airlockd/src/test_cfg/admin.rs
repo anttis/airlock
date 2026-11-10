@@ -2,15 +2,17 @@
 
 use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use airlock_common::network_capnp::network_proxy;
-use airlock_test_utils::{read_until_eof, rpc_loopback, serve};
+use airlock_test_utils::{TempDir, read_until_eof, rpc_loopback, serve};
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::{TcpStream, UnixStream};
 
 use super::mcp::{HttpReply, http};
 use crate::admin::mcp::GrantBridge;
@@ -54,6 +56,9 @@ pub(crate) struct GrantCall {
     pub env: Vec<String>,
     /// Working directory of the command. Empty for the default.
     pub cwd: String,
+    /// User of the command: `(uid, name, verified)`. All default if the
+    /// request has no user.
+    pub user: (u32, String, bool),
 }
 
 /// Decision of [`FakeGrantHost`] for each grant request.
@@ -173,6 +178,16 @@ impl network_proxy::Server for FakeServer {
             rule: req.get_rule()?.to_string()?,
             env: texts(req.get_env()?)?,
             cwd: req.get_cwd()?.to_string()?,
+            user: if req.has_user() {
+                let user = req.get_user()?;
+                (
+                    user.get_uid(),
+                    user.get_name()?.to_string()?,
+                    user.get_verified(),
+                )
+            } else {
+                Default::default()
+            },
         };
         let result = results.get().init_result();
         match self.0.decision {
@@ -362,4 +377,158 @@ pub(crate) async fn call_tool(addr: SocketAddr, name: &str, args: Value) -> Valu
     assert_eq!(reply.status, 200, "{reply:?}");
     let value: Value = serde_json::from_str(&reply.body).unwrap();
     value["result"].clone()
+}
+
+/// Sandbox user of the socket tests. It is not the test user, so the
+/// values of the caller (for example `HOME`) apply to the commands.
+pub(crate) const SOCKET_BOOT_UID: u32 = 4242;
+
+/// MCP socket of a test, with its container root. Drop removes both.
+pub(crate) struct AdminSocket {
+    /// Socket path.
+    pub path: PathBuf,
+    /// Directory of the socket and of the container root. Mode 0755, so
+    /// that other users can reach the socket.
+    pub dir: TempDir,
+}
+
+/// Serve the `airlock` MCP server on a socket in a temp directory. Grant
+/// requests go to `host`. The commands run with no network namespace and
+/// outside of a container.
+/// Args:
+///  - `host`: Fake host for the grant requests
+///  - `caps`: Agent features that the host enabled
+///  - `passwd`: Text of `/etc/passwd` in the container root
+///  - `real_creds`: Run the commands as the client user. Needs root
+pub(crate) async fn serve_admin_socket(
+    host: &Rc<FakeGrantHost>,
+    caps: Capabilities,
+    passwd: &str,
+    real_creds: bool,
+) -> AdminSocket {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = crate::test_cfg::temp_dir();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let rootfs = dir.path().join("rootfs");
+    std::fs::create_dir_all(rootfs.join("etc")).unwrap();
+    std::fs::write(rootfs.join("etc/passwd"), passwd).unwrap();
+
+    let creds = SpawnCreds::default();
+    *creds.borrow_mut() = Some((SOCKET_BOOT_UID, SOCKET_BOOT_UID, false));
+    let mut ctx = GrantContext::new(
+        host.client(),
+        GrantRoutes::new(),
+        creds,
+        vec![FakeGrantHost::BASE_ENV.into(), "USER=sandbox".into()],
+        FakeGrantHost::BASE_CWD.into(),
+    );
+    ctx.rootfs = rootfs.to_string_lossy().into_owned();
+    ctx.skip_netns = true;
+    ctx.real_creds = real_creds;
+    let grants = GrantBridge::start(ctx);
+
+    let path = dir.path().join("mcp.sock");
+    let listener = crate::admin::socket::bind(&path).unwrap();
+    tokio::task::spawn_local(crate::admin::socket::serve(listener, Some(grants), caps));
+    AdminSocket { path, dir }
+}
+
+/// MCP client of the socket. It sends and reads newline-delimited JSON-RPC
+/// messages, as the stdio adapter relays them.
+pub(crate) struct LineClient {
+    lines: Lines<BufReader<OwnedReadHalf>>,
+    writer: OwnedWriteHalf,
+    next_id: u64,
+}
+
+impl LineClient {
+    /// Connect to the socket at `path` and initialize the MCP session.
+    pub async fn connect(path: &Path) -> Self {
+        Self::start(UnixStream::connect(path).await.unwrap()).await
+    }
+
+    /// Initialize the MCP session on a connected stream.
+    pub async fn start(stream: UnixStream) -> Self {
+        let (read, writer) = stream.into_split();
+        let mut client = Self {
+            lines: BufReader::new(read).lines(),
+            writer,
+            next_id: 1,
+        };
+        let init = client
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test", "version": "1" },
+                }),
+            )
+            .await;
+        assert!(init["result"]["serverInfo"].is_object(), "{init}");
+        client
+            .send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+            .await;
+        client
+    }
+
+    /// Send a request and wait for its reply.
+    ///
+    /// Returns:
+    ///   Full JSON-RPC reply.
+    pub async fn request(&mut self, method: &str, params: Value) -> Value {
+        let id = self.send_request(method, params).await;
+        self.read_reply(id).await
+    }
+
+    /// Call a tool and wait for the result.
+    ///
+    /// Returns:
+    ///   JSON-RPC `result` of the call.
+    pub async fn call_tool(&mut self, name: &str, args: Value) -> Value {
+        let id = self.start_call(name, args).await;
+        self.read_reply(id).await["result"].clone()
+    }
+
+    /// Send a tool call and do not wait for the result.
+    ///
+    /// Returns:
+    ///   ID of the request, for [`LineClient::read_reply`].
+    pub async fn start_call(&mut self, name: &str, args: Value) -> u64 {
+        self.send_request("tools/call", json!({ "name": name, "arguments": args }))
+            .await
+    }
+
+    /// Read messages until the reply of request `id` comes.
+    pub async fn read_reply(&mut self, id: u64) -> Value {
+        loop {
+            let line = self
+                .lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("connection closed");
+            let value: Value = serde_json::from_str(&line).unwrap();
+            if value["id"] == id {
+                return value;
+            }
+        }
+    }
+
+    /// Send one request with a new ID.
+    async fn send_request(&mut self, method: &str, params: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(&json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+            .await;
+        id
+    }
+
+    /// Send one message as one line.
+    async fn send(&mut self, message: &Value) {
+        let mut line = message.to_string();
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+    }
 }

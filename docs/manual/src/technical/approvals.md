@@ -32,11 +32,25 @@ request when the notification and the system dialog both fail.
 More details opens a window that shows the whole request:
 
 - the sandbox
+- the hosts or the rule
+- the time limit
+- the user that runs the command
 - the full command
 - the working directory
 - the extra environment
-- the hosts or the rule
-- the time limit
+
+The `User` line shows the name and the uid of the user. Examples:
+
+| Value                                             | Meaning                                                                                  |
+|---------------------------------------------------|------------------------------------------------------------------------------------------|
+| `agent (uid 1000)`                                | The kernel gave the user of the client                                                   |
+| `uid 1001`                                        | The container has no name for this uid                                                   |
+| `root (uid 0, not verified: old HTTP connection)` | The request came over the deprecated HTTP endpoint. The command runs as the sandbox user |
+| `unknown`                                         | An older guest did not send the user                                                     |
+
+The container gives the name, so airlock cleans it as other sandbox
+text. uid 0 always shows as `root`. Thus a name in the container cannot
+hide root. See [Command user](./mcp.md#command-user).
 
 For a rule change, the window shows the lines that change in color.
 

@@ -52,6 +52,20 @@ struct GrantRequest {
   env   @3 :List(Text);
   # Working directory of the command. The host writes it to the log.
   cwd   @4 :Text;
+  # User that the command runs as. The approval prompt shows it. An old
+  # guest does not set it.
+  user  @5 :ExecUser;
+}
+
+struct ExecUser {
+  # User ID of the command.
+  uid      @0 :UInt32;
+  # User name from the account data of the container. Empty if the
+  # container has no entry. The container controls this text.
+  name     @1 :Text;
+  # True if the kernel verified the user of the client (MCP socket).
+  # False for the old HTTP endpoint: the command runs as the sandbox user.
+  verified @2 :Bool;
 }
 
 struct GrantResult {

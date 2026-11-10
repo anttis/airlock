@@ -15,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
 use crate::approval::{
-    Approval, Approver, Decision, GrantPrompt, PromptCommand, PromptRequest, Running,
+    Approval, Approver, Decision, GrantPrompt, PromptCommand, PromptRequest, PromptUser, Running,
     RunningControl,
 };
 use crate::config::config_values::RuleEnabled;
@@ -110,6 +110,10 @@ async fn request(
     r.set_cmd("curl https://example.com");
     r.set_cwd("/work");
     r.set_rule(rule);
+    let mut user = r.reborrow().init_user();
+    user.set_uid(1000);
+    user.set_name("agent");
+    user.set_verified(true);
     let mut list = r.init_hosts(hosts.len() as u32);
     for (i, h) in hosts.iter().enumerate() {
         list.set(i as u32, *h);
@@ -835,6 +839,11 @@ fn test_command() -> PromptCommand {
         cwd: "/work".into(),
         env: vec![],
         duration_secs: 900,
+        user: PromptUser {
+            uid: Some(1000),
+            name: "agent".into(),
+            verified: true,
+        },
     }
 }
 

@@ -1424,6 +1424,30 @@ pub mod grants {
     pub const LABEL_RULE: &str = "Rule";
     /// Detail label of the access duration.
     pub const LABEL_DURATION: &str = "Maximum duration";
+    /// Detail label of the user that the command runs as.
+    pub const LABEL_USER: &str = "User";
+    /// User of a request from a sandbox that does not tell the user.
+    pub const USER_UNKNOWN: &str = "unknown";
+
+    /// Text of the user that the command runs as.
+    /// Args:
+    ///  - `name`: User name from the sandbox, or empty
+    ///  - `uid`: User ID
+    ///  - `verified`: False for the old HTTP connection, which runs the
+    ///    command as the sandbox user
+    pub fn exec_user(name: &str, uid: u32, verified: bool) -> String {
+        let id = if name.is_empty() {
+            format!("uid {uid}")
+        } else {
+            format!("{name} (uid {uid}")
+        };
+        match (name.is_empty(), verified) {
+            (true, true) => id,
+            (true, false) => format!("{id}, not verified: old HTTP connection"),
+            (false, true) => format!("{id})"),
+            (false, false) => format!("{id}, not verified: old HTTP connection)"),
+        }
+    }
 
     /// Text of an access duration.
     pub fn duration(secs: u32) -> String {

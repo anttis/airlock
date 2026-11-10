@@ -21,6 +21,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 
+use crate::admin::caller::{Account, Caller, lookup_account};
 use crate::net::{GrantNet, GrantRoutes};
 use crate::process::{CollectSpec, spawn_collect};
 
@@ -32,6 +33,12 @@ const MISMATCH: &str = "The grant service gave a wrong result.";
 
 /// Number of bytes to keep from the end of stdout, and the same for stderr.
 const OUTPUT_LIMIT: usize = 64 * 1024;
+
+/// Warning in the result of an `execute` call over the old HTTP endpoint.
+pub(crate) const HTTP_EXECUTE_DEPRECATED: &str = "The `execute` tool of the HTTP endpoint \
+    http://admin.airlock/mcp is deprecated and a later release removes it. \
+    The command ran as the sandbox user, not as your user. Connect the \
+    `airlock` MCP server through the stdio adapter /run/airlock/bin/airlock-mcp.";
 
 /// Credentials of the sandbox processes: `(uid, gid, harden)`. The value is
 /// `None` until the boot succeeds.
@@ -51,10 +58,16 @@ pub struct GrantContext {
     pub env: Vec<String>,
     /// Default working directory of the commands.
     pub cwd: String,
-    /// Test only: run the command with no network namespace, as the test
-    /// user.
+    /// Container root as airlockd sees it. The account data of the users
+    /// comes from here.
+    pub rootfs: String,
+    /// Test only: run the command with no network namespace.
     #[cfg(test)]
     pub skip_netns: bool,
+    /// Test only: run the command as the requested user. Needs root.
+    /// Otherwise it runs as the test user.
+    #[cfg(test)]
+    pub real_creds: bool,
 }
 
 impl GrantContext {
@@ -72,8 +85,11 @@ impl GrantContext {
             creds,
             env,
             cwd,
+            rootfs: crate::sandbox_ns::ROOTFS.into(),
             #[cfg(test)]
             skip_netns: false,
+            #[cfg(test)]
+            real_creds: false,
         }
     }
 }
@@ -91,6 +107,8 @@ pub struct ExecRequest {
     pub hosts: Vec<String>,
     /// Name of the on-demand rule. Empty if `hosts` is set.
     pub rule: String,
+    /// Client of the MCP connection. The command runs as its user.
+    pub caller: Caller,
 }
 
 /// Result of one `execute` call.
@@ -108,6 +126,9 @@ pub struct ExecOutput {
     pub hosts: Vec<HostEntry>,
     /// True if the user stopped the command.
     pub aborted: bool,
+    /// Note for the agent about the request, for example a deprecation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// One connect target of a command.
@@ -266,11 +287,26 @@ async fn execute(
     req: ExecRequest,
     reply: &mut Reply,
 ) -> Result<ExecOutput, String> {
-    let Some((uid, gid, harden)) = *ctx.creds.borrow() else {
+    let Some((boot_uid, boot_gid, harden)) = *ctx.creds.borrow() else {
         return Err("Command execution is not available before the sandbox starts.".into());
     };
+    // The user of the command. Only the kernel IDs of a socket client
+    // select it. The old HTTP endpoint keeps the sandbox user.
+    let (uid, gid, verified, warning) = match req.caller {
+        Caller::Verified(peer) => (peer.uid, peer.gid, true, None),
+        Caller::BootUnverified => {
+            warn!("grant: request over the deprecated HTTP endpoint");
+            (
+                boot_uid,
+                boot_gid,
+                false,
+                Some(HTTP_EXECUTE_DEPRECATED.to_string()),
+            )
+        }
+    };
+    let account = lookup_account(ctx.rootfs.clone(), uid).await;
     info!(
-        "grant: request ({} host(s), rule {:?})",
+        "grant: request ({} host(s), rule {:?}, uid {uid}, verified {verified})",
         req.hosts.len(),
         req.rule
     );
@@ -283,7 +319,11 @@ async fn execute(
         r.set_rule(req.rule.as_str());
         r.set_cwd(cwd.as_str());
         set_texts(r.reborrow().init_hosts(len(&req.hosts)), &req.hosts);
-        set_texts(r.init_env(len(&req.env)), &req.env);
+        set_texts(r.reborrow().init_env(len(&req.env)), &req.env);
+        let mut user = r.init_user();
+        user.set_uid(uid);
+        user.set_name(account.name.as_deref().unwrap_or_default());
+        user.set_verified(verified);
     }
     // The approval can take minutes. Drop the request if the client goes
     // away, so the host can remove the approval request.
@@ -298,7 +338,10 @@ async fn execute(
     let grant = match grant {
         Decision::Denied { by_user: true, .. } => {
             info!("grant: denied by the user");
-            return Ok(ExecOutput::default());
+            return Ok(ExecOutput {
+                warning,
+                ..ExecOutput::default()
+            });
         }
         Decision::Denied { reason, .. } => {
             info!("grant: denied: {reason}");
@@ -317,16 +360,26 @@ async fn execute(
     let (net, netns) = grant_network(ctx, grant.proxy)
         .await
         .map_err(|e| format!("The grant network setup failed: {e:#}"))?;
+    // Another user than the sandbox user gets its own home. The sandbox
+    // env has the home of the sandbox user.
+    let caller_layer = if uid == boot_uid {
+        Vec::new()
+    } else {
+        caller_env(&ctx.env, &account)
+    };
     let spec = CollectSpec {
         cmd: req.cmd,
         env: command_env(
-            &ca_defaults(std::path::Path::new(crate::sandbox_ns::ROOTFS)),
+            &ca_defaults(std::path::Path::new(&ctx.rootfs)),
             ctx.env.clone(),
+            caller_layer,
             req.env,
         ),
         cwd,
         netns,
         output_limit: OUTPUT_LIMIT,
+        #[cfg(test)]
+        real_creds: ctx.real_creds,
     };
     let handle = spawn_collect(spec, uid, gid, harden)
         .map_err(|e| format!("The command did not start: {e:#}"))?;
@@ -369,6 +422,7 @@ async fn execute(
         stderr: output.stderr,
         hosts,
         aborted,
+        warning,
     })
 }
 
@@ -678,10 +732,40 @@ fn ca_defaults(root: &std::path::Path) -> Vec<String> {
 /// Args:
 ///  - `defaults`: CA defaults (see [`ca_defaults`])
 ///  - `sandbox`: Base environment of the sandbox, as `airlock exec` uses it
+///  - `caller`: Values of the user of the command, if it is not the sandbox
+///    user (see [`caller_env`])
 ///  - `agent`: Environment from the `execute` call. Its keys are checked
 ///    before
-fn command_env(defaults: &[String], sandbox: Vec<String>, agent: Vec<String>) -> Vec<String> {
-    merge_env(merge_env(defaults.to_vec(), sandbox), agent)
+fn command_env(
+    defaults: &[String],
+    sandbox: Vec<String>,
+    caller: Vec<String>,
+    agent: Vec<String>,
+) -> Vec<String> {
+    merge_env(
+        merge_env(merge_env(defaults.to_vec(), sandbox), caller),
+        agent,
+    )
+}
+
+/// Get the environment values of a user that is not the sandbox user:
+/// `HOME` from the account data, or `/` if it has no home. `USER` and
+/// `LOGNAME` get the account name, but only if the sandbox env has them.
+/// Args:
+///  - `sandbox`: Base environment of the sandbox
+///  - `account`: Account data of the user
+fn caller_env(sandbox: &[String], account: &Account) -> Vec<String> {
+    let home = account.home.as_deref().unwrap_or("/");
+    let mut env = vec![format!("HOME={home}")];
+    if let Some(name) = &account.name {
+        for key in ["USER", "LOGNAME"] {
+            let prefix = format!("{key}=");
+            if sandbox.iter().any(|e| e.starts_with(&prefix)) {
+                env.push(format!("{key}={name}"));
+            }
+        }
+    }
+    env
 }
 
 /// Add the agent's environment to the base environment. An agent value
@@ -729,16 +813,23 @@ mod tests {
         assert!(env.contains(&"SSL_CERT_DIR=/etc/ssl/certs".to_string()));
     }
 
-    /// Test the order of the environment layers: the CA defaults, then the
-    /// sandbox env, then the env of the agent. A later layer wins.
+    /// Test the order of the environment layers: the CA defaults, the
+    /// sandbox env, the values of the caller, then the env of the agent. A
+    /// later layer wins. So an agent `HOME` still wins over the caller home.
     ///   1. Give the same keys in more layers
     ///   2. Check the value of each key and that each key shows once
     #[test]
-    fn command_env_layers_defaults_sandbox_then_agent() {
+    fn command_env_layers_defaults_sandbox_caller_then_agent() {
         let strings = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
         let env = command_env(
             &strings(&["SSL_CERT_FILE=/ca", "PIP_CERT=/ca", "UV_NATIVE_TLS=1"]),
-            strings(&["PIP_CERT=/sandbox", "MODE=sandbox", "PATH=/bin"]),
+            strings(&[
+                "PIP_CERT=/sandbox",
+                "MODE=sandbox",
+                "PATH=/bin",
+                "HOME=/root",
+            ]),
+            strings(&["HOME=/home/agent", "MODE=caller"]),
             strings(&["MODE=agent"]),
         );
         let mut env = env;
@@ -746,12 +837,32 @@ mod tests {
         assert_eq!(
             env,
             strings(&[
+                "HOME=/home/agent",
                 "MODE=agent",
                 "PATH=/bin",
                 "PIP_CERT=/sandbox",
                 "SSL_CERT_FILE=/ca",
                 "UV_NATIVE_TLS=1",
             ])
+        );
+    }
+
+    /// Test the environment of a user that is not the sandbox user. `USER`
+    /// and `LOGNAME` change only if the sandbox env has them, and a user
+    /// with no account data gets `HOME=/`.
+    ///   1. Get the values for an account, with `USER` in the sandbox env
+    ///   2. Get the values for a user with no account data
+    #[test]
+    fn caller_env_sets_home_and_only_known_name_keys() {
+        let account = Account {
+            name: Some("agent".into()),
+            home: Some("/home/agent".into()),
+        };
+        let env = caller_env(&["USER=root".into(), "PATH=/bin".into()], &account);
+        assert_eq!(env, ["HOME=/home/agent", "USER=agent"]);
+        assert_eq!(
+            caller_env(&["USER=root".into()], &Account::default()),
+            ["HOME=/"]
         );
     }
 }

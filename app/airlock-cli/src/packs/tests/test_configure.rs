@@ -186,22 +186,28 @@ fn builtin_pack_fingerprints_with_current_inputs_stay_same() {
         "copilot@1".into(),
         fingerprint(&packs, "[packs]\ncopilot = { version = 1 }\n"),
     ));
+    for name in ["claude", "codex", "copilot"] {
+        actual.push((
+            format!("{name}@2"),
+            fingerprint(&packs, &format!("[packs]\n{name} = {{ version = 2 }}\n")),
+        ));
+    }
     let actual: Vec<(&str, &str)> = actual
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
     let expected: Vec<(&str, &str)> = vec![
         (
-            "claude@2",
-            "e992d538f2eacb79e11400e3d999525b3bf0aa7b3db8e576d2c7652f90370894",
+            "claude@3",
+            "91d90fda6327ad5bd288205333eff3c680dc513e80ca64525b639bde0b2aca56",
         ),
         (
-            "codex@2",
-            "8607ed8007509f5a0d568773550dfc06b5e0ebabd4b9594fecd6adcd09806da6",
+            "codex@3",
+            "f4000752283ac09c9f15b694a1e7f63fd3b4cbb0804a286ff064c023cb763964",
         ),
         (
-            "copilot@2",
-            "bed13459892cc680f1f22fc19aae14f4d4f8152d0ba4933409a037d01b31eeae",
+            "copilot@3",
+            "2acf0e06275acdcba3bd05a3949db107413be2f575db9295ba634afab9c1f1bd",
         ),
         (
             "docker@1",
@@ -246,6 +252,18 @@ fn builtin_pack_fingerprints_with_current_inputs_stay_same() {
         (
             "copilot@1",
             "4011a95d48ce53381c6c223da455f02c3ddd2a291bf8678130a22666586d7cab",
+        ),
+        (
+            "claude@2",
+            "e992d538f2eacb79e11400e3d999525b3bf0aa7b3db8e576d2c7652f90370894",
+        ),
+        (
+            "codex@2",
+            "8607ed8007509f5a0d568773550dfc06b5e0ebabd4b9594fecd6adcd09806da6",
+        ),
+        (
+            "copilot@2",
+            "bed13459892cc680f1f22fc19aae14f4d4f8152d0ba4933409a037d01b31eeae",
         ),
     ];
     assert_eq!(actual, expected);

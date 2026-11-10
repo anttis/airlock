@@ -17,6 +17,22 @@ use tracing::warn;
 /// it, such as `/run/airlock`). The container sees them.
 const ROOTFS: &str = "/mnt/overlay/rootfs";
 
+/// True after init mounted the per-boot tmpfs at `/run/airlock`.
+static BRIDGE_TMPFS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record that init mounted the per-boot tmpfs at `/run/airlock`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn set_bridge_tmpfs_mounted() {
+    BRIDGE_TMPFS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Tell if `/run/airlock` is the per-boot tmpfs of airlockd. Only then the
+/// guest users cannot replace its files. If init skipped the tmpfs (a
+/// symlink in the rootfs), the directory is part of the guest's upper layer.
+pub fn bridge_tmpfs_mounted() -> bool {
+    BRIDGE_TMPFS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Resolve a container path inside the container rootfs, with chroot
 /// symlink semantics (see [`crate::util::resolve_in_root`]).
 pub fn in_rootfs(guest_path: &str) -> PathBuf {

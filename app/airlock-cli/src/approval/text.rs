@@ -4,7 +4,7 @@
 //! and the rule contents. This text is not trusted. It must not change the look of the prompt,
 //! hide parts of it or make it too long.
 
-use super::{GrantPrompt, PromptCommand, PromptRequest};
+use super::{GrantPrompt, PromptCommand, PromptRequest, PromptUser};
 use crate::config::config_values::NetworkRule;
 use crate::messages::grants as msg;
 
@@ -12,6 +12,8 @@ use crate::messages::grants as msg;
 pub(crate) const MAX_DESCRIPTION: usize = 200;
 /// Maximum length of a rule name, in characters.
 const MAX_RULE_NAME: usize = 64;
+/// Maximum length of a user name.
+const MAX_USER_NAME: usize = 64;
 /// Maximum length of one host pattern, in characters.
 const MAX_HOST: usize = 100;
 /// Maximum length of the sandbox name, in characters.
@@ -395,6 +397,7 @@ fn diff_lines(old: &str, new: &str) -> Vec<DiffLine> {
 /// Make the details of a command request.
 fn command_items(command: &PromptCommand) -> Vec<DetailItem> {
     let mut items = vec![
+        DetailItem::new(msg::LABEL_USER, user_text(&command.user), false),
         DetailItem::new(
             msg::LABEL_COMMAND,
             clean_lines(&command.cmd, MAX_COMMAND, MAX_COMMAND_LINES),
@@ -414,6 +417,21 @@ fn command_items(command: &PromptCommand) -> Vec<DetailItem> {
         ));
     }
     items
+}
+
+/// Make the text of the user that a command runs as. The name comes from
+/// the sandbox, so it gets the same cleanup as other sandbox texts. uid 0
+/// always shows as `root`, so a sandbox cannot hide it with another name.
+fn user_text(user: &PromptUser) -> String {
+    let Some(uid) = user.uid else {
+        return msg::USER_UNKNOWN.to_string();
+    };
+    let name = if uid == 0 {
+        "root".to_string()
+    } else {
+        cut_middle(clean(&user.name), MAX_USER_NAME, MAX_USER_NAME / 2)
+    };
+    msg::exec_user(&name, uid, user.verified)
 }
 
 /// Prompt text in a safe form, ready to show.
@@ -763,6 +781,7 @@ mod tests {
                     true
                 ),
                 ("Maximum duration", "1 h", false),
+                ("User", "agent (uid 1000)", false),
                 ("Command", "npm install\nnpm test", true),
                 ("Working directory", "/work", true),
                 ("Extra environment", "A='it'\\''s'\nB=''", true),
@@ -801,16 +820,43 @@ mod tests {
                 "Sandbox",
                 "Hosts",
                 "Maximum duration",
+                "User",
                 "Command",
                 "Working directory",
                 "Extra environment",
             ]
         );
         assert_eq!(text.details[1].value, "all hosts");
-        let shown: Vec<&str> = text.details[3].value.lines().collect();
+        let shown: Vec<&str> = text.details[4].value.lines().collect();
         assert_eq!(shown.len(), MAX_COMMAND_LINES + 1);
         assert_eq!(shown[..4], ["npm ci", "Hosts:", "registry.npmjs.org", "x"]);
         assert_eq!(shown[MAX_COMMAND_LINES], "# and 13 more lines");
+    }
+
+    /// Test the user line of a command request. The name comes from the
+    /// sandbox, so it must not hide root or carry escapes, and the user
+    /// must see when the old HTTP connection did not verify the user.
+    ///   1. Check a verified user with escapes in the name
+    ///   2. Check uid 0 with another name, and a user with no name
+    ///   3. Check an unverified user and a request with no user
+    #[test]
+    fn user_line_shows_real_root_and_unverified_http() {
+        let user = |uid, name: &str, verified| PromptUser {
+            uid,
+            name: name.into(),
+            verified,
+        };
+        assert_eq!(
+            user_text(&user(Some(1000), "age\x1b[2Knt", true)),
+            "age nt (uid 1000)"
+        );
+        assert_eq!(user_text(&user(Some(0), "nobody", true)), "root (uid 0)");
+        assert_eq!(user_text(&user(Some(1001), "", true)), "uid 1001");
+        assert_eq!(
+            user_text(&user(Some(0), "", false)),
+            "root (uid 0, not verified: old HTTP connection)"
+        );
+        assert_eq!(user_text(&PromptUser::default()), "unknown");
     }
 
     fn command() -> PromptCommand {
@@ -819,6 +865,11 @@ mod tests {
             cwd: "/work".into(),
             env: vec!["A=it's".into(), "B=".into()],
             duration_secs: 3600,
+            user: PromptUser {
+                uid: Some(1000),
+                name: "agent".into(),
+                verified: true,
+            },
         }
     }
 

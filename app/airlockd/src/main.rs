@@ -4,7 +4,11 @@
 //! host CLI and serves its requests. The host uses airlockd to set up the
 //! guest environment (mounts, networking, DNS) and to run processes in the
 //! sandbox.
+//!
+//! With the program name `airlock-mcp`, the binary is the stdio adapter of
+//! the `airlock` MCP server for agents in the sandbox.
 
+mod adapter;
 mod admin;
 mod bridge;
 mod browser;
@@ -35,11 +39,18 @@ use tracing::info;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[tokio::main(flavor = "current_thread")]
 #[allow(clippy::large_futures)]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // The adapter mode runs in sandbox processes. It must not start any
+    // part of the supervisor, so select it before the runtime starts.
+    if adapter::is_adapter(std::env::args_os().next().as_deref()) {
+        std::process::exit(adapter::run());
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let local = LocalSet::new();
-    local.run_until(airlockd()).await?;
+    runtime.block_on(local.run_until(airlockd()))?;
     Ok(())
 }
 
